@@ -1,0 +1,36 @@
+{
+  "ports": [
+    {
+      "id": "ssh",
+      "name": "SSH Server",
+      "local_addr": "127.0.0.1:22",
+      "protocol": "tcp",
+      "description": "SSH remote access",
+      "allow_access": true
+    },
+    {
+      "id": "http",
+      "name": "HTTP Web",
+      "local_addr": "127.0.0.1:8080",
+      "protocol": "tcp",
+      "description": "Web server",
+      "allow_access": true
+    },
+    {
+      "id": "https",
+      "name": "HTTPS Secure",
+      "local_addr": "127.0.0.1:443",
+      "protocol": "tcp",
+      "description": "Secure web server",
+      "allow_access": true
+    },
+    {
+      "id": "mysql",
+      "name": "MySQL Database",
+      "local_addr": "127.0.0.1:3306",
+      "protocol": "tcp",
+      "description": "Database server (admin only)",
+      "allow_access": false
+    }
+  ]
+}

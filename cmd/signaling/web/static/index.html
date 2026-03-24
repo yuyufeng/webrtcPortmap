@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC PortMap - HTTP Web Console</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container { max-width: 3000px; margin: 0 auto; }
+        h1 { text-align: center; color: #333; margin-bottom: 30px; }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .card h2 { margin-bottom: 15px; color: #555; font-size: 18px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; color: #666; font-size: 14px; }
+        input, select, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        input:focus, select:focus, textarea:focus { outline: none; border-color: #4CAF50; }
+        textarea { font-family: 'Consolas', monospace; min-height: 100px; }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        .btn-primary { background: #4CAF50; color: white; }
+        .btn-primary:hover { background: #45a049; }
+        .btn-danger { background: #f44336; color: white; }
+        .btn-secondary { background: #2196F3; color: white; }
+        .btn-secondary:hover { background: #0b7dda; }
+        .status { padding: 10px; border-radius: 4px; margin-bottom: 15px; }
+        .status.success { background: #d4edda; color: #155724; }
+        .status.error { background: #f8d7da; color: #721c24; }
+        .status.info { background: #d1ecf1; color: #0c5460; }
+        .agent-list, .ports-list { list-style: none; }
+        .agent-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        .agent-item:hover { background: #f9f9f9; }
+        .agent-info { flex: 1; }
+        .agent-id { font-weight: bold; color: #333; font-size: 16px; }
+        .agent-status { font-size: 12px; color: #666; margin-top: 4px; }
+        .agent-status.online { color: #4CAF50; }
+        .flex { display: flex; gap: 10px; }
+        .hidden { display: none !important; }
+        .text-center { text-align: center; }
+        .mt-4 { margin-top: 20px; }
+        .logs {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .logs .log-time { color: #858585; }
+        .logs .log-error { color: #f44336; }
+        .http-console {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        @media (max-width: 768px) {
+            .http-console { grid-template-columns: 1fr; }
+        }
+        .response-panel {
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+        }
+        .response-panel h3 {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 5px;
+        }
+        .response-content {
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .response-iframe {
+            width: 100%;
+            height: 400px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+        }
+        .port-buttons {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+        }
+        .port-buttons button {
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌐 WebRTC PortMap - HTTP Web Console</h1>
+        <p class="text-center" style="color: #666; margin-bottom: 20px;">
+            通过 WebRTC P2P 连接访问 Agent 本地 HTTP 服务
+        </p>
+
+        <!-- 步骤1: 配置并查看Agent列表 -->
+        <div class="card" id="config-card">
+            <h2>🔌 步骤1: 配置信令服务器</h2>
+            <div class="form-group">
+                <label>信令服务器 URL</label>
+                <input type="text" id="signal-url" placeholder="http://localhost:8443" value="http://localhost:8443">
+            </div>
+            <div class="form-group">
+                <label>信令服务器 Token (可选)</label>
+                <input type="password" id="signal-token" placeholder="如果需要鉴权则填写">
+            </div>
+            <button class="btn btn-primary" onclick="listAgents()">查看在线Agent</button>
+        </div>
+
+        <!-- 步骤2: 选择Agent -->
+        <div class="card hidden" id="agents-card">
+            <h2>📋 步骤2: 选择Agent</h2>
+            <ul class="agent-list" id="agent-list"></ul>
+            <button class="btn btn-secondary mt-4" onclick="listAgents()">刷新列表</button>
+        </div>
+
+        <!-- 步骤3: 输入密码鉴权 -->
+        <div class="card hidden" id="password-card">
+            <h2>🔐 步骤3: 输入密码鉴权</h2>
+            <div class="form-group">
+                <label>Agent ID</label>
+                <input type="text" id="agent-id" readonly>
+            </div>
+            <div class="form-group">
+                <label>Agent 密码</label>
+                <input type="password" id="agent-password" placeholder="输入Agent的访问密码">
+            </div>
+            <div id="password-status"></div>
+            <div class="flex">
+                <button class="btn btn-primary" onclick="connect()">连接并鉴权</button>
+                <button class="btn btn-secondary" onclick="backToList()">返回列表</button>
+            </div>
+        </div>
+
+        <!-- 步骤4: HTTP Web 控制台 -->
+        <div class="card hidden" id="http-console-card">
+            <h2>🌐 HTTP Web 控制台</h2>
+            
+            <!-- 快速选择端口按钮 -->
+            <div class="port-buttons" id="port-buttons">
+                <label style="margin-bottom: 10px; display: block;">快速选择端口:</label>
+                <span style="color: #999;">连接成功后显示可用端口</span>
+            </div>
+            
+            <div class="http-console">
+                <!-- 请求面板 -->
+                <div class="request-panel">
+                    <div class="form-group">
+                        <label>HTTP 方法</label>
+                        <select id="http-method">
+                            <option value="GET">GET</option>
+                            <option value="POST">POST</option>
+                            <option value="PUT">PUT</option>
+                            <option value="DELETE">DELETE</option>
+                            <option value="PATCH">PATCH</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>请求 URL</label>
+                        <input type="text" id="http-url" placeholder="http://127.0.0.1:8080/api/test" value="http://127.0.0.1:80/">
+                    </div>
+                    <div class="form-group">
+                        <label>请求 Headers (每行一个 Key: Value)</label>
+                        <textarea id="http-headers" rows="3">Content-Type: application/json
+Accept: text/html,application/xhtml+xml</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>请求 Body</label>
+                        <textarea id="http-body" rows="4"></textarea>
+                    </div>
+                    <button class="btn btn-primary" onclick="sendHTTPRequest()">发送请求</button>
+                    <button class="btn btn-danger" onclick="disconnect()" style="margin-left: 10px;">断开连接</button>
+                </div>
+                
+                <!-- 响应面板 -->
+                <div class="response-panel">
+                    <h3>响应状态</h3>
+                    <div id="http-response-status" class="response-content" style="margin-bottom: 15px;">等待请求...</div>
+                    
+                    <h3>响应 Headers</h3>
+                    <div id="http-response-headers" class="response-content" style="margin-bottom: 15px; max-height: 150px;"></div>
+                    
+                    <h3>响应 Body</h3>
+                    <div id="http-response-body" class="response-content" style="max-height: 200px;"></div>
+                </div>
+            </div>
+            
+            <!-- HTML 预览 -->
+            <div class="mt-4" style="margin-top: 20px;">
+                <h3>HTML 预览</h3>
+                <iframe id="http-response-preview" class="response-iframe hidden"></iframe>
+            </div>
+        </div>
+
+        <!-- 日志 -->
+        <div class="card">
+            <h2>📜 日志</h2>
+            <div class="logs" id="logs"></div>
+            <button class="btn btn-secondary mt-4" onclick="clearLogs()">清空</button>
+        </div>
+    </div>
+
+    <script src="controller.js?v=3"></script>
+</body>
+</html>

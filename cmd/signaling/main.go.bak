@@ -1,0 +1,172 @@
+// signaling/main.go - 集成Web UI的信令服务器
+package main
+
+import (
+	"embed"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/pion/webrtc/v4"
+)
+
+//go:embed all:web/static
+var staticFiles embed.FS
+
+// AgentInfo Agent信息
+type AgentInfo struct {
+	ID           string    `json:"id"`
+	Token        string    `json:"token"`
+	AgentKey     string    `json:"-"`
+	LastSeen     time.Time `json:"last_seen"`
+	Connected    bool      `json:"connected"`
+	ControllerCh chan *SignalMessage `json:"-"`
+	AgentCh      chan *SignalMessage `json:"-"`
+}
+
+// SignalMessage 信令消息
+type SignalMessage struct {
+	Type      string                    `json:"type"`
+	AgentID   string                    `json:"agent_id,omitempty"`
+	SDP       *webrtc.SessionDescription `json:"sdp,omitempty"`
+	Candidate *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
+	Token     string                    `json:"token,omitempty"`
+}
+
+// Server 信令服务器
+type Server struct {
+	addr       string
+	authToken  string
+	webDir     string
+	mu         sync.RWMutex
+	agents     map[string]*AgentInfo
+	tokens     map[string]string
+}
+
+// NewServer 创建信令服务器
+func NewServer(addr, authToken, webDir string) *Server {
+	return &Server{
+		addr:      addr,
+		authToken: authToken,
+		webDir:    webDir,
+		agents:    make(map[string]*AgentInfo),
+		tokens:    make(map[string]string),
+	}
+}
+
+// Start 启动服务器
+func (s *Server) Start() error {
+	mux := http.NewServeMux()
+	
+	// API路由 - 需要CORS
+	mux.HandleFunc("/agent/register", s.withCORS(s.handleAgentRegister))
+	mux.HandleFunc("/agent/heartbeat", s.withCORS(s.handleAgentHeartbeat))
+	mux.HandleFunc("/agent/poll", s.withCORS(s.handleAgentPoll))
+	mux.HandleFunc("/agent/send", s.withCORS(s.handleAgentSend))
+	mux.HandleFunc("/controller/list", s.withCORS(s.handleControllerList))
+	mux.HandleFunc("/controller/connect", s.withCORS(s.handleControllerConnect))
+	mux.HandleFunc("/controller/poll", s.withCORS(s.handleControllerPoll))
+	mux.HandleFunc("/controller/send", s.withCORS(s.handleControllerSend))
+	mux.HandleFunc("/status", s.withCORS(s.handleStatus))
+	
+	// 静态文件服务
+	mux.HandleFunc("/", s.handleStaticFiles)
+
+	fmt.Printf("[Signaling] Server starting on http://%s\n", s.addr)
+	fmt.Printf("[Signaling] Web UI: http://%s/\n", s.addr)
+	
+	return http.ListenAndServe(s.addr, mux)
+}
+
+// withCORS CORS中间件
+func (s *Server) withCORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		
+		handler(w, r)
+	}
+}
+
+// handleStaticFiles 处理静态文件
+func (s *Server) handleStaticFiles(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/agent/") || 
+	   strings.HasPrefix(r.URL.Path, "/controller/") ||
+	   strings.HasPrefix(r.URL.Path, "/status") {
+		http.NotFound(w, r)
+		return
+	}
+	
+	path := r.URL.Path
+	if path == "/" {
+		path = "/index.html"
+	}
+	path = strings.TrimPrefix(path, "/")
+	
+	// 优先从外部目录读取
+	if s.webDir != "" {
+		filePath := filepath.Join(s.webDir, path)
+		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+			http.ServeFile(w, r, filePath)
+			return
+		}
+	}
+	
+	// 从embed读取
+	webPath := "web/static/" + path
+	data, err := staticFiles.ReadFile(webPath)
+	if err != nil {
+		data, err = staticFiles.ReadFile("web/static/index.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(data)
+		return
+	}
+	
+	w.Header().Set("Content-Type", getContentType(path))
+	w.Write(data)
+}
+
+func getContentType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
+	case ".js":
+		return "application/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".svg":
+		return "image/svg+xml"
+	case ".ico":
+		return "image/x-icon"
+	default:
+		return "application/octet-stream"
+	}
+}
