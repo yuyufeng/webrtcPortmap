@@ -10,9 +10,11 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #f5f5f5;
             padding: 20px;
+            color: #333;
         }
         .container { max-width: 3000px; margin: 0 auto; }
-        h1 { text-align: center; color: #333; margin-bottom: 30px; }
+        h1 { text-align: center; color: #333; margin-bottom: 16px; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 20px; }
         .card {
             background: white;
             border-radius: 8px;
@@ -34,12 +36,13 @@
         input:focus, select:focus, textarea:focus { outline: none; border-color: #4CAF50; }
         textarea { font-family: 'Consolas', monospace; min-height: 100px; }
         .btn {
-            padding: 10px 20px;
+            padding: 10px 16px;
             border: none;
             border-radius: 4px;
             cursor: pointer;
             font-size: 14px;
             transition: background 0.3s;
+            white-space: nowrap;
         }
         .btn-primary { background: #4CAF50; color: white; }
         .btn-primary:hover { background: #45a049; }
@@ -76,53 +79,36 @@
             border-radius: 4px;
             font-family: 'Consolas', monospace;
             font-size: 12px;
-            max-height: 200px;
+            max-height: 220px;
             overflow-y: auto;
             white-space: pre-wrap;
         }
         .logs .log-time { color: #858585; }
         .logs .log-error { color: #f44336; }
-        .http-console {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
-        @media (max-width: 768px) {
-            .http-console { grid-template-columns: 1fr; }
-        }
-        .response-panel {
-            background: #f9f9f9;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 15px;
-        }
-        .response-panel h3 {
-            font-size: 14px;
+        .toolbar-note {
             color: #666;
-            margin-bottom: 10px;
-            border-bottom: 1px solid #ddd;
-            padding-bottom: 5px;
+            font-size: 13px;
+            margin-bottom: 12px;
         }
-        .response-content {
-            font-family: 'Consolas', monospace;
-            font-size: 12px;
-            white-space: pre-wrap;
-            word-break: break-all;
-            max-height: 300px;
-            overflow-y: auto;
-            background: white;
-            padding: 10px;
-            border-radius: 4px;
+        .compact-toolbar {
+            display: grid;
+            grid-template-columns: 120px 220px minmax(280px, 1fr) auto auto;
+            gap: 10px;
+            align-items: end;
         }
-        .response-iframe {
-            width: 100%;
-            height: 400px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            background: white;
+        .compact-toolbar .form-group {
+            margin-bottom: 0;
+        }
+        .compact-toolbar .toolbar-actions {
+            display: flex;
+            gap: 10px;
+            align-items: end;
+        }
+        .compact-toolbar .toolbar-path {
+            min-width: 0;
         }
         .port-buttons {
-            margin: 10px 0;
+            margin: 0 0 12px 0;
             padding: 10px;
             background: #f5f5f5;
             border-radius: 4px;
@@ -130,16 +116,112 @@
         .port-buttons button {
             margin: 5px;
         }
+        .details-card {
+            margin-top: 12px;
+            border: 1px solid #e5e5e5;
+            border-radius: 6px;
+            background: #fafafa;
+        }
+        .details-card summary {
+            cursor: pointer;
+            padding: 12px 14px;
+            font-weight: 600;
+            color: #555;
+            user-select: none;
+        }
+        .details-body {
+            padding: 0 14px 14px 14px;
+        }
+        .response-grid {
+            display: grid;
+            grid-template-columns: 220px 1fr 1fr;
+            gap: 12px;
+        }
+        .response-block h3 {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+        .response-content {
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 220px;
+            overflow-y: auto;
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #e5e5e5;
+        }
+        .preview-panel {
+            margin-top: 14px;
+        }
+        .preview-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .preview-header h3 {
+            font-size: 16px;
+            color: #444;
+        }
+        .response-iframe {
+            width: 100%;
+            height: calc(100vh - 250px);
+            min-height: 560px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background: white;
+        }
+        #logs-card details[open] .logs {
+            margin-top: 0;
+        }
+        body.connected-mode #logs-card {
+            margin-top: 12px;
+        }
+        @media (max-width: 1200px) {
+            .compact-toolbar {
+                grid-template-columns: 120px 1fr;
+            }
+            .compact-toolbar .toolbar-path {
+                grid-column: 1 / -1;
+            }
+            .compact-toolbar .toolbar-actions {
+                grid-column: 1 / -1;
+            }
+            .response-grid {
+                grid-template-columns: 1fr;
+            }
+            .response-iframe {
+                height: calc(100vh - 320px);
+                min-height: 460px;
+            }
+        }
+        @media (max-width: 768px) {
+            body { padding: 12px; }
+            .card { padding: 14px; }
+            .compact-toolbar { grid-template-columns: 1fr; }
+            .compact-toolbar .toolbar-actions {
+                width: 100%;
+                flex-wrap: wrap;
+            }
+            .compact-toolbar .toolbar-actions .btn {
+                flex: 1 1 auto;
+            }
+            .response-iframe {
+                height: 70vh;
+                min-height: 360px;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🌐 WebRTC PortMap - HTTP Web Console</h1>
-        <p class="text-center" style="color: #666; margin-bottom: 20px;">
-            通过 WebRTC P2P 连接访问 Agent 本地 HTTP 服务
-        </p>
+        <p class="subtitle">通过 WebRTC P2P 连接访问 Agent 本地 HTTP 服务</p>
 
-        <!-- 步骤1: 配置并查看Agent列表 -->
         <div class="card" id="config-card">
             <h2>🔌 步骤1: 配置信令服务器</h2>
             <div class="form-group">
@@ -153,14 +235,12 @@
             <button class="btn btn-primary" onclick="listAgents()">查看在线Agent</button>
         </div>
 
-        <!-- 步骤2: 选择Agent -->
         <div class="card hidden" id="agents-card">
             <h2>📋 步骤2: 选择Agent</h2>
             <ul class="agent-list" id="agent-list"></ul>
             <button class="btn btn-secondary mt-4" onclick="listAgents()">刷新列表</button>
         </div>
 
-        <!-- 步骤3: 输入密码鉴权 -->
         <div class="card hidden" id="password-card">
             <h2>🔐 步骤3: 输入密码鉴权</h2>
             <div class="form-group">
@@ -178,33 +258,45 @@
             </div>
         </div>
 
-        <!-- 步骤4: HTTP Web 控制台 -->
         <div class="card hidden" id="http-console-card">
             <h2>🌐 HTTP Web 控制台</h2>
-            
-            <!-- 快速选择端口按钮 -->
+            <div class="toolbar-note">连接完成后保留服务切换、请求路径和发送控件；响应详情与日志默认折叠，尽量把空间留给预览。</div>
+
             <div class="port-buttons" id="port-buttons">
                 <label style="margin-bottom: 10px; display: block;">快速选择端口:</label>
                 <span style="color: #999;">连接成功后显示可用端口</span>
             </div>
-            
-            <div class="http-console">
-                <!-- 请求面板 -->
-                <div class="request-panel">
-                    <div class="form-group">
-                        <label>HTTP 方法</label>
-                        <select id="http-method">
-                            <option value="GET">GET</option>
-                            <option value="POST">POST</option>
-                            <option value="PUT">PUT</option>
-                            <option value="DELETE">DELETE</option>
-                            <option value="PATCH">PATCH</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>请求 URL</label>
-                        <input type="text" id="http-url" placeholder="http://127.0.0.1:8080/api/test" value="http://127.0.0.1:80/">
-                    </div>
+
+            <div class="compact-toolbar">
+                <div class="form-group">
+                    <label>方法</label>
+                    <select id="http-method">
+                        <option value="GET">GET</option>
+                        <option value="POST">POST</option>
+                        <option value="PUT">PUT</option>
+                        <option value="DELETE">DELETE</option>
+                        <option value="PATCH">PATCH</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>目标服务</label>
+                    <select id="http-port">
+                        <option value="">连接成功后可选择</option>
+                    </select>
+                </div>
+                <div class="form-group toolbar-path">
+                    <label>请求路径</label>
+                    <input type="text" id="http-path" placeholder="/api/test?name=demo" value="/">
+                </div>
+                <div class="toolbar-actions">
+                    <button class="btn btn-primary" onclick="sendHTTPRequest()">发送请求</button>
+                    <button class="btn btn-danger" onclick="disconnect()">断开连接</button>
+                </div>
+            </div>
+
+            <details class="details-card" id="request-details">
+                <summary>请求详情</summary>
+                <div class="details-body">
                     <div class="form-group">
                         <label>请求 Headers (每行一个 Key: Value)</label>
                         <textarea id="http-headers" rows="3">Content-Type: application/json
@@ -214,35 +306,45 @@ Accept: text/html,application/xhtml+xml</textarea>
                         <label>请求 Body</label>
                         <textarea id="http-body" rows="4"></textarea>
                     </div>
-                    <button class="btn btn-primary" onclick="sendHTTPRequest()">发送请求</button>
-                    <button class="btn btn-danger" onclick="disconnect()" style="margin-left: 10px;">断开连接</button>
                 </div>
-                
-                <!-- 响应面板 -->
-                <div class="response-panel">
-                    <h3>响应状态</h3>
-                    <div id="http-response-status" class="response-content" style="margin-bottom: 15px;">等待请求...</div>
-                    
-                    <h3>响应 Headers</h3>
-                    <div id="http-response-headers" class="response-content" style="margin-bottom: 15px; max-height: 150px;"></div>
-                    
-                    <h3>响应 Body</h3>
-                    <div id="http-response-body" class="response-content" style="max-height: 200px;"></div>
+            </details>
+
+            <details class="details-card" id="response-details">
+                <summary>响应详情</summary>
+                <div class="details-body">
+                    <div class="response-grid">
+                        <div class="response-block">
+                            <h3>响应状态</h3>
+                            <div id="http-response-status" class="response-content">等待请求...</div>
+                        </div>
+                        <div class="response-block">
+                            <h3>响应 Headers</h3>
+                            <div id="http-response-headers" class="response-content"></div>
+                        </div>
+                        <div class="response-block">
+                            <h3>响应 Body</h3>
+                            <div id="http-response-body" class="response-content"></div>
+                        </div>
+                    </div>
                 </div>
-            </div>
-            
-            <!-- HTML 预览 -->
-            <div class="mt-4" style="margin-top: 20px;">
-                <h3>HTML 预览</h3>
+            </details>
+
+            <div class="preview-panel">
+                <div class="preview-header">
+                    <h3>HTML 预览</h3>
+                </div>
                 <iframe id="http-response-preview" class="response-iframe hidden"></iframe>
             </div>
         </div>
 
-        <!-- 日志 -->
-        <div class="card">
-            <h2>📜 日志</h2>
-            <div class="logs" id="logs"></div>
-            <button class="btn btn-secondary mt-4" onclick="clearLogs()">清空</button>
+        <div class="card" id="logs-card">
+            <details>
+                <summary>📜 日志</summary>
+                <div class="details-body">
+                    <div class="logs" id="logs"></div>
+                    <button class="btn btn-secondary mt-4" onclick="clearLogs()">清空</button>
+                </div>
+            </details>
         </div>
     </div>
 

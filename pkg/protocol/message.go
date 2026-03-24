@@ -34,6 +34,13 @@ const (
 	// HTTP 代理消息
 	MsgTypeHTTPRequest  // HTTP 请求
 	MsgTypeHTTPResponse // HTTP 响应
+
+	// WebSocket 代理消息
+	MsgTypeWSOpen
+	MsgTypeWSOpenAck
+	MsgTypeWSData
+	MsgTypeWSClose
+	MsgTypeWSError
 )
 
 func (t MessageType) String() string {
@@ -62,6 +69,26 @@ func (t MessageType) String() string {
 		return "CONNECT_RESP"
 	case MsgTypeCloseStream:
 		return "CLOSE_STREAM"
+	case MsgTypeAgentConfig:
+		return "AGENT_CONFIG"
+	case MsgTypeAccessPort:
+		return "ACCESS_PORT"
+	case MsgTypeAccessResponse:
+		return "ACCESS_RESPONSE"
+	case MsgTypeHTTPRequest:
+		return "HTTP_REQUEST"
+	case MsgTypeHTTPResponse:
+		return "HTTP_RESPONSE"
+	case MsgTypeWSOpen:
+		return "WS_OPEN"
+	case MsgTypeWSOpenAck:
+		return "WS_OPEN_ACK"
+	case MsgTypeWSData:
+		return "WS_DATA"
+	case MsgTypeWSClose:
+		return "WS_CLOSE"
+	case MsgTypeWSError:
+		return "WS_ERROR"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}
@@ -213,11 +240,13 @@ type AccessPortResponse struct {
 
 // HTTPRequest HTTP 请求消息
 type HTTPRequest struct {
-	ID      string            `json:"id"`       // 请求唯一ID，用于匹配响应
-	Method  string            `json:"method"`   // GET, POST, PUT, DELETE 等
-	URL     string            `json:"url"`      // 完整 URL
-	Headers map[string]string `json:"headers"`  // 请求头
-	Body    []byte            `json:"body"`     // 请求体
+	ID      string            `json:"id"`                // 请求唯一ID，用于匹配响应
+	PortID  string            `json:"port_id,omitempty"` // 目标端口配置ID
+	Method  string            `json:"method"`            // GET, POST, PUT, DELETE 等
+	Path    string            `json:"path,omitempty"`    // 请求路径，必须以 / 开头
+	URL     string            `json:"url,omitempty"`     // 兼容旧版，完整 URL
+	Headers map[string]string `json:"headers"`           // 请求头
+	Body    []byte            `json:"body"`              // 请求体，JSON 中为 base64
 }
 
 // HTTPResponse HTTP 响应消息
@@ -226,5 +255,44 @@ type HTTPResponse struct {
 	StatusCode int               `json:"status_code"` // HTTP 状态码
 	Headers    map[string]string `json:"headers"`     // 响应头
 	Body       []byte            `json:"body"`        // 响应体
+	ChunkIndex int               `json:"chunk_index,omitempty"` // 分片序号，从0开始
+	TotalChunks int              `json:"total_chunks,omitempty"` // 总分片数
+	Done       bool              `json:"done,omitempty"` // 是否最后一个分片/完整响应
 	Error      string            `json:"error,omitempty"` // 错误信息
+}
+
+// WSOpenRequest WebSocket 打开请求
+type WSOpenRequest struct {
+	SocketID string            `json:"socket_id"`
+	PortID   string            `json:"port_id,omitempty"`
+	Path     string            `json:"path,omitempty"`
+	URL      string            `json:"url,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty"`
+}
+
+// WSOpenAck WebSocket 打开响应
+type WSOpenAck struct {
+	SocketID string `json:"socket_id"`
+	Success  bool   `json:"success"`
+	Error    string `json:"error,omitempty"`
+}
+
+// WSData WebSocket 数据帧
+type WSData struct {
+	SocketID string `json:"socket_id"`
+	Data     []byte `json:"data"`
+	Text     bool   `json:"text"`
+}
+
+// WSClose WebSocket 关闭消息
+type WSClose struct {
+	SocketID string `json:"socket_id"`
+	Code     int    `json:"code,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// WSError WebSocket 错误消息
+type WSError struct {
+	SocketID string `json:"socket_id"`
+	Error    string `json:"error"`
 }

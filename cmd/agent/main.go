@@ -8,17 +8,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-portmap/pkg/auth"
 	"webrtc-portmap/pkg/protocol"
 	"webrtc-portmap/pkg/tunnel"
 	wr "webrtc-portmap/pkg/webrtc"
 )
+
+const maxHTTPResponseChunkSize = 96 * 1024
 
 // SignalMessage 信令消息
 type SignalMessage struct {
@@ -27,6 +33,11 @@ type SignalMessage struct {
 	SDP       *webrtc.SessionDescription `json:"sdp,omitempty"`
 	Candidate *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
 	Token     string                     `json:"token,omitempty"`
+}
+
+type wsProxyConn struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
 }
 
 type Agent struct {
@@ -47,6 +58,9 @@ type Agent struct {
 	
 	// 端口配置
 	ports []protocol.PortInfo
+
+	wsMu    sync.RWMutex
+	wsConns map[string]*wsProxyConn
 }
 
 func main() {
@@ -76,6 +90,7 @@ func main() {
 		sigToken:   *sigToken,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		stopChan:   make(chan struct{}),
+		wsConns:    make(map[string]*wsProxyConn),
 	}
 
 	// 加载端口配置
@@ -394,6 +409,12 @@ func (a *Agent) handleMessage(data []byte) {
 		a.handleAccessPort(msg.Payload)
 	case 16: // MsgTypeHTTPRequest
 		go a.handleHTTPRequest(msg.Payload)
+	case protocol.MsgTypeWSOpen:
+		go a.handleWSOpen(msg.Payload)
+	case protocol.MsgTypeWSData:
+		go a.handleWSData(msg.Payload)
+	case protocol.MsgTypeWSClose:
+		go a.handleWSClose(msg.Payload)
 	case protocol.MsgTypePing:
 		a.handlePing(&msg)
 	default:
@@ -525,7 +546,13 @@ func (a *Agent) handleHTTPRequest(payload []byte) {
 		return
 	}
 
-	fmt.Printf("[Agent] HTTP %s %s\n", req.Method, req.URL)
+	targetURL, err := a.resolveHTTPRequestTarget(&req)
+	if err != nil {
+		a.sendHTTPError(req.ID, err.Error())
+		return
+	}
+
+	fmt.Printf("[Agent] HTTP %s %s (port=%s)\n", req.Method, targetURL, req.PortID)
 
 	// 创建 HTTP 客户端
 	client := &http.Client{
@@ -533,7 +560,7 @@ func (a *Agent) handleHTTPRequest(payload []byte) {
 	}
 
 	// 创建请求
-	httpReq, err := http.NewRequest(req.Method, req.URL, bytes.NewReader(req.Body))
+	httpReq, err := http.NewRequest(req.Method, targetURL, bytes.NewReader(req.Body))
 	if err != nil {
 		a.sendHTTPError(req.ID, fmt.Sprintf("Failed to create request: %v", err))
 		return
@@ -564,22 +591,359 @@ func (a *Agent) handleHTTPRequest(payload []byte) {
 		ID:         req.ID,
 		StatusCode: httpResp.StatusCode,
 		Headers:    make(map[string]string),
-		Body:       body,
 	}
 
 	// 复制响应头
 	for key, values := range httpResp.Header {
 		if len(values) > 0 {
-			resp.Headers[key] = values[0]
+			resp.Headers[key] = strings.Join(values, "\n")
 		}
 	}
 
-	msg, _ := protocol.NewMessage(protocol.MsgTypeHTTPResponse, resp)
-	if err := a.sendMessage(msg); err != nil {
+	if err := a.sendHTTPResponseChunks(resp, body); err != nil {
 		fmt.Printf("[Agent] Failed to send HTTP response: %v\n", err)
 	} else {
 		fmt.Printf("[Agent] HTTP response sent: %d, body size: %d\n", resp.StatusCode, len(body))
 	}
+}
+
+func (a *Agent) resolveHTTPRequestTarget(req *protocol.HTTPRequest) (string, error) {
+	if req == nil {
+		return "", fmt.Errorf("empty request")
+	}
+
+	if req.PortID != "" {
+		portInfo := a.findAccessiblePort(req.PortID)
+		if portInfo == nil {
+			return "", fmt.Errorf("port %s not found or access denied", req.PortID)
+		}
+		if portInfo.Protocol != "tcp" {
+			return "", fmt.Errorf("port %s protocol %s is not supported for HTTP proxy", req.PortID, portInfo.Protocol)
+		}
+
+		path := strings.TrimSpace(req.Path)
+		if path == "" {
+			path = "/"
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		pathURL, err := url.ParseRequestURI(path)
+		if err != nil {
+			return "", fmt.Errorf("invalid path: %w", err)
+		}
+
+		scheme := inferHTTPScheme(portInfo)
+		return (&url.URL{
+			Scheme: scheme,
+			Host:   portInfo.LocalAddr,
+			Path:   pathURL.Path,
+			RawQuery: pathURL.RawQuery,
+			Fragment: pathURL.Fragment,
+		}).String(), nil
+	}
+
+	if strings.TrimSpace(req.URL) == "" {
+		return "", fmt.Errorf("missing port_id or url")
+	}
+
+	targetURL, err := url.Parse(req.URL)
+	if err != nil {
+		return "", fmt.Errorf("invalid url: %w", err)
+	}
+	if targetURL.Host == "" {
+		return "", fmt.Errorf("invalid url host")
+	}
+
+	portInfo := a.findPortByLocalAddr(targetURL.Host)
+	if portInfo == nil || !portInfo.AllowAccess {
+		return "", fmt.Errorf("target host %s is not in allowed ports", targetURL.Host)
+	}
+
+	return targetURL.String(), nil
+}
+
+func (a *Agent) findAccessiblePort(portID string) *protocol.PortInfo {
+	for i := range a.ports {
+		if a.ports[i].ID == portID && a.ports[i].AllowAccess {
+			return &a.ports[i]
+		}
+	}
+	return nil
+}
+
+func (a *Agent) findPortByLocalAddr(localAddr string) *protocol.PortInfo {
+	for i := range a.ports {
+		if a.ports[i].LocalAddr == localAddr {
+			return &a.ports[i]
+		}
+	}
+	return nil
+}
+
+func inferHTTPScheme(portInfo *protocol.PortInfo) string {
+	if portInfo == nil {
+		return "http"
+	}
+	if portInfo.ID == "https" || strings.HasSuffix(portInfo.LocalAddr, ":443") {
+		return "https"
+	}
+	if strings.Contains(strings.ToLower(portInfo.Name), "https") {
+		return "https"
+	}
+	return "http"
+}
+
+func inferWSScheme(portInfo *protocol.PortInfo) string {
+	if portInfo == nil {
+		return "ws"
+	}
+	if portInfo.ID == "https" || strings.HasSuffix(portInfo.LocalAddr, ":443") {
+		return "wss"
+	}
+	if strings.Contains(strings.ToLower(portInfo.Name), "https") {
+		return "wss"
+	}
+	return "ws"
+}
+
+func (a *Agent) resolveWSTarget(req *protocol.WSOpenRequest) (string, error) {
+	if req == nil {
+		return "", fmt.Errorf("empty websocket request")
+	}
+	if req.PortID != "" {
+		portInfo := a.findAccessiblePort(req.PortID)
+		if portInfo == nil {
+			return "", fmt.Errorf("port %s not found or access denied", req.PortID)
+		}
+		if portInfo.Protocol != "tcp" {
+			return "", fmt.Errorf("port %s protocol %s is not supported for websocket proxy", req.PortID, portInfo.Protocol)
+		}
+		path := strings.TrimSpace(req.Path)
+		if path == "" {
+			path = "/"
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		pathURL, err := url.ParseRequestURI(path)
+		if err != nil {
+			return "", fmt.Errorf("invalid websocket path: %w", err)
+		}
+		return (&url.URL{
+			Scheme:   inferWSScheme(portInfo),
+			Host:     portInfo.LocalAddr,
+			Path:     pathURL.Path,
+			RawQuery: pathURL.RawQuery,
+			Fragment: pathURL.Fragment,
+		}).String(), nil
+	}
+
+	if strings.TrimSpace(req.URL) == "" {
+		return "", fmt.Errorf("missing port_id or url")
+	}
+	targetURL, err := url.Parse(req.URL)
+	if err != nil {
+		return "", fmt.Errorf("invalid websocket url: %w", err)
+	}
+	if targetURL.Host == "" {
+		return "", fmt.Errorf("invalid websocket url host")
+	}
+	portInfo := a.findPortByLocalAddr(targetURL.Host)
+	if portInfo == nil || !portInfo.AllowAccess {
+		return "", fmt.Errorf("target host %s is not in allowed ports", targetURL.Host)
+	}
+	return targetURL.String(), nil
+}
+
+func (a *Agent) handleWSOpen(payload []byte) {
+	var req protocol.WSOpenRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		a.sendWSError("", fmt.Sprintf("failed to parse ws open request: %v", err))
+		return
+	}
+
+	fmt.Printf("[Agent][DC-WS] Open request socket=%s port=%s path=%s url=%s\n", req.SocketID, req.PortID, req.Path, req.URL)
+	targetURL, err := a.resolveWSTarget(&req)
+	if err != nil {
+		fmt.Printf("[Agent][DC-WS] Resolve target failed socket=%s: %v\n", req.SocketID, err)
+		a.sendWSOpenAck(req.SocketID, false, err.Error())
+		return
+	}
+	fmt.Printf("[Agent][DC-WS] Dial target socket=%s -> %s\n", req.SocketID, targetURL)
+
+	header := http.Header{}
+	for key, value := range req.Headers {
+		header.Set(key, value)
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(targetURL, header)
+	if err != nil {
+		fmt.Printf("[Agent][DC-WS] Dial failed socket=%s: %v\n", req.SocketID, err)
+		a.sendWSOpenAck(req.SocketID, false, fmt.Sprintf("websocket dial failed: %v", err))
+		return
+	}
+
+	a.wsMu.Lock()
+	a.wsConns[req.SocketID] = &wsProxyConn{conn: conn}
+	a.wsMu.Unlock()
+
+	fmt.Printf("[Agent][DC-WS] Open success socket=%s\n", req.SocketID)
+	a.sendWSOpenAck(req.SocketID, true, "")
+	go a.readWSLoop(req.SocketID, conn)
+}
+
+func (a *Agent) handleWSData(payload []byte) {
+	var data protocol.WSData
+	if err := json.Unmarshal(payload, &data); err != nil {
+		a.sendWSError("", fmt.Sprintf("failed to parse ws data: %v", err))
+		return
+	}
+
+	conn := a.getWSConn(data.SocketID)
+	if conn == nil {
+		fmt.Printf("[Agent][DC-WS] Write ignored, socket not found: %s\n", data.SocketID)
+		a.sendWSError(data.SocketID, "websocket not found")
+		return
+	}
+
+	messageType := websocket.BinaryMessage
+	if data.Text {
+		messageType = websocket.TextMessage
+	}
+	fmt.Printf("[Agent][DC-WS] Write socket=%s text=%v size=%d\n", data.SocketID, data.Text, len(data.Data))
+	conn.writeMu.Lock()
+	err := conn.conn.WriteMessage(messageType, data.Data)
+	conn.writeMu.Unlock()
+	if err != nil {
+		fmt.Printf("[Agent][DC-WS] Write failed socket=%s: %v\n", data.SocketID, err)
+		a.sendWSError(data.SocketID, fmt.Sprintf("websocket write failed: %v", err))
+		a.closeWSConn(data.SocketID, websocket.CloseInternalServerErr, "write failed")
+	}
+}
+
+func (a *Agent) handleWSClose(payload []byte) {
+	var closeMsg protocol.WSClose
+	if err := json.Unmarshal(payload, &closeMsg); err != nil {
+		return
+	}
+	a.closeWSConn(closeMsg.SocketID, closeMsg.Code, closeMsg.Reason)
+}
+
+func (a *Agent) readWSLoop(socketID string, conn *websocket.Conn) {
+	defer a.closeWSConn(socketID, websocket.CloseNormalClosure, "closed")
+	for {
+		messageType, data, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Printf("[Agent][DC-WS] Read failed socket=%s: %v\n", socketID, err)
+			if closeErr, ok := err.(*websocket.CloseError); ok {
+				a.sendWSClose(socketID, closeErr.Code, closeErr.Text)
+			} else {
+				a.sendWSError(socketID, fmt.Sprintf("websocket read failed: %v", err))
+			}
+			return
+		}
+
+		fmt.Printf("[Agent][DC-WS] Read socket=%s text=%v size=%d\n", socketID, messageType == websocket.TextMessage, len(data))
+		msgType := protocol.MsgTypeWSData
+		payload := protocol.WSData{
+			SocketID: socketID,
+			Data:     data,
+			Text:     messageType == websocket.TextMessage,
+		}
+		msg, _ := protocol.NewMessage(msgType, payload)
+		if err := a.sendMessage(msg); err != nil {
+			fmt.Printf("[Agent] Failed to send websocket data: %v\n", err)
+			return
+		}
+	}
+}
+
+func (a *Agent) sendWSOpenAck(socketID string, success bool, errText string) {
+	msg, _ := protocol.NewMessage(protocol.MsgTypeWSOpenAck, protocol.WSOpenAck{
+		SocketID: socketID,
+		Success:  success,
+		Error:    errText,
+	})
+	_ = a.sendMessage(msg)
+}
+
+func (a *Agent) sendWSClose(socketID string, code int, reason string) {
+	msg, _ := protocol.NewMessage(protocol.MsgTypeWSClose, protocol.WSClose{
+		SocketID: socketID,
+		Code:     code,
+		Reason:   reason,
+	})
+	_ = a.sendMessage(msg)
+}
+
+func (a *Agent) sendWSError(socketID string, errText string) {
+	msg, _ := protocol.NewMessage(protocol.MsgTypeWSError, protocol.WSError{
+		SocketID: socketID,
+		Error:    errText,
+	})
+	_ = a.sendMessage(msg)
+}
+
+func (a *Agent) getWSConn(socketID string) *wsProxyConn {
+	a.wsMu.RLock()
+	defer a.wsMu.RUnlock()
+	return a.wsConns[socketID]
+}
+
+func (a *Agent) closeWSConn(socketID string, code int, reason string) {
+	a.wsMu.Lock()
+	wsConn := a.wsConns[socketID]
+	if wsConn != nil {
+		delete(a.wsConns, socketID)
+	}
+	a.wsMu.Unlock()
+
+	if wsConn != nil {
+		fmt.Printf("[Agent][DC-WS] Close socket=%s code=%d reason=%s\n", socketID, code, reason)
+		wsConn.writeMu.Lock()
+		if code != 0 {
+			_ = wsConn.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(2*time.Second))
+		}
+		_ = wsConn.conn.Close()
+		wsConn.writeMu.Unlock()
+	}
+}
+
+func (a *Agent) sendHTTPResponseChunks(resp protocol.HTTPResponse, body []byte) error {
+	if len(body) == 0 {
+		resp.Done = true
+		msg, _ := protocol.NewMessage(protocol.MsgTypeHTTPResponse, resp)
+		return a.sendMessage(msg)
+	}
+
+	totalChunks := (len(body) + maxHTTPResponseChunkSize - 1) / maxHTTPResponseChunkSize
+	for i := 0; i < totalChunks; i++ {
+		start := i * maxHTTPResponseChunkSize
+		end := start + maxHTTPResponseChunkSize
+		if end > len(body) {
+			end = len(body)
+		}
+
+		chunkResp := protocol.HTTPResponse{
+			ID:          resp.ID,
+			StatusCode:  resp.StatusCode,
+			Headers:     resp.Headers,
+			Body:        body[start:end],
+			ChunkIndex:  i,
+			TotalChunks: totalChunks,
+			Done:        i == totalChunks-1,
+		}
+		if i > 0 {
+			chunkResp.Headers = nil
+		}
+
+		msg, _ := protocol.NewMessage(protocol.MsgTypeHTTPResponse, chunkResp)
+		if err := a.sendMessage(msg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sendHTTPError 发送 HTTP 错误响应
@@ -619,6 +983,14 @@ func (a *Agent) sendMessage(msg *protocol.Message) error {
 
 // cleanup 清理资源
 func (a *Agent) cleanup() {
+	a.wsMu.Lock()
+	for socketID, wsConn := range a.wsConns {
+		wsConn.writeMu.Lock()
+		_ = wsConn.conn.Close()
+		wsConn.writeMu.Unlock()
+		delete(a.wsConns, socketID)
+	}
+	a.wsMu.Unlock()
 	if a.peer != nil {
 		a.peer.Close()
 		a.peer = nil

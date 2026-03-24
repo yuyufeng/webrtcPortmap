@@ -4,22 +4,16 @@ package auth
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 const (
-	// 密钥派生参数
-	pbkdf2Iterations = 100000
 	keyLength        = 32 // AES-256
-	saltLength       = 32
 
 	// 加密参数
 	nonceLength = 12 // GCM标准nonce长度
@@ -27,25 +21,18 @@ const (
 
 // Crypto 加密器
 type Crypto struct {
-	key []byte
+	key       []byte
+	keyString string
 }
 
 // NewCrypto 从密码创建加密器
-// 使用固定的salt（基于ID）确保相同ID+密码产生相同密钥
 func NewCrypto(password, id string) *Crypto {
-	// 使用ID作为salt，确保相同ID+密码总能派生相同密钥
-	fmt.Printf("[Auth] NewCrypto: password='%s', id='%s'\n", password, id)
-	salt := deriveSalt(id)
-	fmt.Printf("[Auth] salt=%x\n", salt[:8])
-	key := pbkdf2.Key([]byte(password), salt, pbkdf2Iterations, keyLength, sha256.New)
-	fmt.Printf("[Auth] key=%x...\n", key[:8])
-	return &Crypto{key: key}
-}
-
-// deriveSalt 从ID派生固定salt
-func deriveSalt(id string) []byte {
-	h := sha256.Sum256([]byte(id))
-	return h[:saltLength]
+	keyString := portableHash256("key|" + id + "|" + password)
+	keyHash := sha256.Sum256([]byte(keyString))
+	key := make([]byte, keyLength)
+	copy(key, keyHash[:])
+	fmt.Printf("[Auth] NewCrypto: id='%s', key=%x...\n", id, key[:8])
+	return &Crypto{key: key, keyString: keyString}
 }
 
 // Encrypt 加密数据（返回base64）
@@ -117,14 +104,11 @@ func GenerateChallenge() (string, error) {
 	return base64.StdEncoding.EncodeToString(challenge), nil
 }
 
-// HashChallenge 计算挑战值的HMAC-SHA256响应
+// HashChallenge 计算挑战值响应
 func (c *Crypto) HashChallenge(challenge string, timestamp int64) string {
-	data := fmt.Sprintf("%s:%d", challenge, timestamp)
-	fmt.Printf("[Auth] Go计算HMAC: challenge=%s, timestamp=%d, data=%s, keyLen=%d\n", challenge, timestamp, data, len(c.key))
-	mac := hmac.New(sha256.New, c.key)
-	mac.Write([]byte(data))
-	result := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	fmt.Printf("[Auth] Go HMAC结果: %s\n", result)
+	data := fmt.Sprintf("resp|%s|%s|%d", c.keyString, challenge, timestamp)
+	result := portableHash256(data)
+	fmt.Printf("[Auth] Go challenge response: challenge=%s, timestamp=%d, result=%s\n", challenge, timestamp, result)
 	return result
 }
 
@@ -132,4 +116,23 @@ func (c *Crypto) HashChallenge(challenge string, timestamp int64) string {
 func (c *Crypto) VerifyResponse(challenge string, timestamp int64, response string) bool {
 	expected := c.HashChallenge(challenge, timestamp)
 	return expected == response
+}
+
+func portableHash256(input string) string {
+	parts := make([]byte, 0, 64)
+	for i := 0; i < 8; i++ {
+		sum := fnv1a32(fmt.Sprintf("%d|%s", i, input))
+		parts = append(parts, []byte(fmt.Sprintf("%08x", sum))...)
+	}
+	return string(parts)
+}
+
+func fnv1a32(input string) uint32 {
+	var hash uint32 = 2166136261
+	const prime uint32 = 16777619
+	for i := 0; i < len(input); i++ {
+		hash ^= uint32(input[i])
+		hash *= prime
+	}
+	return hash
 }
