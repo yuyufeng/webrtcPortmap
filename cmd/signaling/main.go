@@ -100,6 +100,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/auth/register", s.withCORS(s.handleAuthRegister))
 	mux.HandleFunc("/auth/login", s.withCORS(s.handleAuthLogin))
 	mux.HandleFunc("/auth/me", s.withCORS(s.handleAuthMe))
+	mux.HandleFunc("/auth/change-password", s.withCORS(s.handleAuthChangePassword))
 	mux.HandleFunc("/controller/list", s.withCORS(s.handleControllerList))
 	mux.HandleFunc("/controller/agent/delete", s.withCORS(s.handleControllerAgentDelete))
 	mux.HandleFunc("/controller/agents/register", s.withCORS(s.handleControllerAgentRegister))
@@ -480,6 +481,38 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		"email":          user.Email,
 		"email_verified": user.EmailVerified,
 		"expires_at":     session.ExpiresAt,
+	}, http.StatusOK)
+}
+
+func (s *Server) handleAuthChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_, user, err := s.requireUser(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.OldPassword) == "" || strings.TrimSpace(req.NewPassword) == "" {
+		http.Error(w, "old_password and new_password are required", http.StatusBadRequest)
+		return
+	}
+	if err := s.dataStore.ChangeUserPassword(user.ID, req.OldPassword, req.NewPassword); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"message": "password updated",
 	}, http.StatusOK)
 }
 

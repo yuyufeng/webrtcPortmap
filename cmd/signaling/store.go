@@ -285,6 +285,25 @@ func (ds *DataStore) FindUserByHash(userHash string) *UserRecord {
 	return ds.data.Users[userID]
 }
 
+func (ds *DataStore) ChangeUserPassword(userID, oldPassword, newPassword string) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	user := ds.data.Users[userID]
+	if user == nil {
+		return fmt.Errorf("user not found")
+	}
+	if strings.TrimSpace(newPassword) == "" {
+		return fmt.Errorf("new password is required")
+	}
+	if !verifyPasswordHash(user.PasswordSalt, user.PasswordHash, oldPassword) {
+		return fmt.Errorf("invalid old password")
+	}
+	salt, hash := newPasswordHash(newPassword)
+	user.PasswordSalt = salt
+	user.PasswordHash = hash
+	return ds.saveLocked()
+}
+
 func (ds *DataStore) MarkEmailVerified(email string) error {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()

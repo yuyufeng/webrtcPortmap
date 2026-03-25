@@ -566,7 +566,8 @@
 <body>
     <div class="container">
         <div class="topbar hidden" id="topbar">
-            <button class="btn btn-secondary" type="button" onclick="logoutUser()">退出登录</button>
+            <button class="btn btn-secondary" type="button" onclick="openChangePasswordModal()">修改密码</button>
+            <button style="padding-left: 20px;" class="btn btn-secondary" type="button" onclick="logoutUser()">退出登录</button>
         </div>
         <h1>🌐 WebRTC PortMap - HTTP Web Console</h1>
         <p class="subtitle">通过 WebRTC P2P 连接访问 Agent 本地 HTTP 服务</p>
@@ -821,6 +822,29 @@ Accept: text/html,application/xhtml+xml</textarea>
             <div class="connect-modal-actions">
                 <button class="btn btn-secondary" type="button" onclick="closeConnectModal()">取消</button>
                 <button class="btn btn-primary" type="button" onclick="connect()">连接并鉴权</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="connect-modal hidden" id="change-password-modal">
+        <div class="connect-modal-dialog">
+            <div class="connect-modal-title">修改密码</div>
+            <div class="form-group">
+                <label>当前密码</label>
+                <input type="password" id="change-password-old" placeholder="输入当前密码">
+            </div>
+            <div class="form-group">
+                <label>新密码</label>
+                <input type="password" id="change-password-new" placeholder="输入新密码">
+            </div>
+            <div class="form-group">
+                <label>确认新密码</label>
+                <input type="password" id="change-password-confirm" placeholder="再次输入新密码">
+            </div>
+            <div id="change-password-status"></div>
+            <div class="connect-modal-actions">
+                <button class="btn btn-secondary" type="button" onclick="closeChangePasswordModal()">取消</button>
+                <button class="btn btn-primary" type="button" onclick="changePassword()">确认修改</button>
             </div>
         </div>
     </div>

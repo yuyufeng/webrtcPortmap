@@ -443,6 +443,55 @@ function closeConnectModal() {
     document.getElementById('connect-modal')?.classList.add('hidden');
 }
 
+function openChangePasswordModal() {
+    document.getElementById('change-password-old').value = '';
+    document.getElementById('change-password-new').value = '';
+    document.getElementById('change-password-confirm').value = '';
+    const status = document.getElementById('change-password-status');
+    if (status) {
+        status.className = 'hidden';
+        status.textContent = '';
+    }
+    document.getElementById('change-password-modal')?.classList.remove('hidden');
+}
+
+function closeChangePasswordModal() {
+    document.getElementById('change-password-modal')?.classList.add('hidden');
+}
+
+async function changePassword() {
+    const oldPassword = document.getElementById('change-password-old')?.value || '';
+    const newPassword = document.getElementById('change-password-new')?.value || '';
+    const confirmPassword = document.getElementById('change-password-confirm')?.value || '';
+    if (!oldPassword || !newPassword) {
+        showStatus('change-password-status', '请填写完整密码信息', 'error');
+        return;
+    }
+    if (newPassword !== confirmPassword) {
+        showStatus('change-password-status', '两次输入的新密码不一致', 'error');
+        return;
+    }
+    try {
+        const response = await fetch(`${state.signalURL}/auth/change-password`, {
+            method: 'POST',
+            headers: buildJSONHeaders(true),
+            body: JSON.stringify({
+                old_password: oldPassword,
+                new_password: newPassword
+            })
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(text || `修改失败: ${response.status}`);
+        }
+        showStatus('change-password-status', '密码修改成功', 'success');
+        setTimeout(() => closeChangePasswordModal(), 500);
+    } catch (err) {
+        log(`修改密码失败: ${err.message}`, 'error');
+        showStatus('change-password-status', `修改密码失败: ${err.message}`, 'error');
+    }
+}
+
 async function deleteAgent(id, displayName) {
     const name = displayName || id;
     if (!window.confirm(`确认删除 Agent "${name}" 吗？在线 Agent 会被立即断开。`)) {
@@ -2123,3 +2172,6 @@ window.disconnect = disconnect;
 window.clearLogs = clearLogs;
 window.backToList = backToList;
 window.logoutUser = logoutUser;
+window.openChangePasswordModal = openChangePasswordModal;
+window.closeChangePasswordModal = closeChangePasswordModal;
+window.changePassword = changePassword;
