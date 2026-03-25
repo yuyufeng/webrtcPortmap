@@ -40,11 +40,12 @@ func (m *ClientManager) HandleConnectRequest(payload []byte) error {
 		return err
 	}
 
-	fmt.Printf("[Client] Received connect request: stream=%d, remote=%s\n", req.StreamID, req.Remote)
+	fmt.Printf("[AgentTunnel] Received connect request: stream=%d, remote=%s\n", req.StreamID, req.Remote)
 
 	// 连接到远程目标
 	conn, err := net.Dial(req.Protocol, req.Remote)
 	if err != nil {
+		fmt.Printf("[AgentTunnel] Connect failed stream=%d remote=%s err=%v\n", req.StreamID, req.Remote, err)
 		// 发送失败响应
 		resp := protocol.StreamConnectResp{
 			StreamID: req.StreamID,
@@ -55,6 +56,7 @@ func (m *ClientManager) HandleConnectRequest(payload []byte) error {
 		m.handler.SendMessage(msg)
 		return fmt.Errorf("failed to connect to %s: %w", req.Remote, err)
 	}
+	fmt.Printf("[AgentTunnel] Connected stream=%d remote=%s\n", req.StreamID, req.Remote)
 
 	// 注册流
 	m.mu.Lock()
@@ -90,9 +92,10 @@ func (m *ClientManager) readLoop(streamID uint16, conn net.Conn) {
 	for {
 		n, err := conn.Read(buf)
 		if err != nil {
-			// 连接关闭或错误
+			fmt.Printf("[AgentTunnel] Read error on stream %d: %v\n", streamID, err)
 			return
 		}
+		fmt.Printf("[AgentTunnel] Read %d bytes from remote on stream %d\n", n, streamID)
 
 		// 打包数据
 		data := m.packData(streamID, buf[:n])
@@ -102,9 +105,10 @@ func (m *ClientManager) readLoop(streamID uint16, conn net.Conn) {
 		}
 
 		if err := m.handler.SendMessage(msg); err != nil {
-			fmt.Printf("[Client] Failed to send data: %v\n", err)
+			fmt.Printf("[AgentTunnel] Failed to send data on stream %d: %v\n", streamID, err)
 			return
 		}
+		fmt.Printf("[AgentTunnel] Sent %d bytes to peer on stream %d\n", n, streamID)
 	}
 }
 
@@ -139,7 +143,7 @@ func (m *ClientManager) HandleDataMessage(payload []byte) error {
 	}
 
 	if _, err := stream.Conn.Write(msg.Data); err != nil {
-		fmt.Printf("[Client] Write error on stream %d: %v\n", msg.StreamID, err)
+		fmt.Printf("[AgentTunnel] Write error on stream %d: %v\n", msg.StreamID, err)
 		m.closeStream(msg.StreamID)
 		return err
 	}
@@ -171,8 +175,9 @@ func (m *ClientManager) closeStream(streamID uint16) {
 	}
 	msg, _ := protocol.NewMessage(protocol.MsgTypeCloseStream, closeMsg)
 	m.handler.SendMessage(msg)
+	fmt.Printf("[AgentTunnel] Sent close for stream %d\n", streamID)
 
-	fmt.Printf("[Client] Stream %d closed\n", streamID)
+	fmt.Printf("[AgentTunnel] Stream %d closed\n", streamID)
 }
 
 // HandleCloseStream 处理关闭流消息
@@ -182,7 +187,7 @@ func (m *ClientManager) HandleCloseStream(payload []byte) error {
 		return err
 	}
 
-	fmt.Printf("[Client] Received close for stream %d: %s\n", closeMsg.StreamID, closeMsg.Reason)
+	fmt.Printf("[AgentTunnel] Received close for stream %d: %s\n", closeMsg.StreamID, closeMsg.Reason)
 	
 	m.mu.Lock()
 	stream, exists := m.streams[closeMsg.StreamID]
@@ -209,16 +214,17 @@ func (m *ClientManager) HandleHalfCloseStream(payload []byte) error {
 	stream, exists := m.streams[halfClose.StreamID]
 	m.mu.RUnlock()
 	if !exists || stream.Conn == nil {
-		return fmt.Errorf("stream %d not found", halfClose.StreamID)
+		fmt.Printf("[AgentTunnel] Ignore half-close for missing stream %d\n", halfClose.StreamID)
+		return nil
 	}
 
 	if tcpConn, ok := stream.Conn.(*net.TCPConn); ok {
-		fmt.Printf("[Client] Half-close write for stream %d\n", halfClose.StreamID)
+		fmt.Printf("[AgentTunnel] Half-close write for stream %d\n", halfClose.StreamID)
 		return tcpConn.CloseWrite()
 	}
 
 	// 非 TCPConn 时退化为全关闭
-	fmt.Printf("[Client] Half-close fallback to close for stream %d\n", halfClose.StreamID)
+	fmt.Printf("[AgentTunnel] Half-close fallback to close for stream %d\n", halfClose.StreamID)
 	return stream.Conn.Close()
 }
 

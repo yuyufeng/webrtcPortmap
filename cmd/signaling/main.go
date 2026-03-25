@@ -34,6 +34,11 @@ type AgentInfo struct {
 	OwnerUserID  string    `json:"owner_user_id"`
 	LastSeen     time.Time `json:"last_seen"`
 	Connected    bool      `json:"connected"`
+	ControllerSessionToken string `json:"-"`
+	ControllerUserID       string `json:"-"`
+	ControllerUsername     string `json:"-"`
+	ControllerKind         string `json:"-"`
+	ControllerWSConn       *websocket.Conn `json:"-"`
 	ControllerCh chan *SignalMessage `json:"-"`
 	AgentCh      chan *SignalMessage `json:"-"`
 }
@@ -99,8 +104,17 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/controller/poll", s.withCORS(s.handleControllerPoll))
 	mux.HandleFunc("/controller/send", s.withCORS(s.handleControllerSend))
 	mux.HandleFunc("/controller/ws", s.handleControllerWS)
-	mux.HandleFunc("/client/list", s.withCORS(s.handleControllerList))
-	mux.HandleFunc("/client/ws", s.handleControllerWS)
+	mux.HandleFunc("/client/list", s.withCORS(s.handleClientList))
+	mux.HandleFunc("/client/connect", s.withCORS(s.handleClientConnect))
+	mux.HandleFunc("/client/ws", s.handleClientWS)
+	mux.HandleFunc("/download/agent", s.withCORS(s.handleDownloadAgent))
+	mux.HandleFunc("/download/agent/windows", s.withCORS(s.handleDownloadAgentWindows))
+	mux.HandleFunc("/download/agent/linux", s.withCORS(s.handleDownloadAgentLinux))
+	mux.HandleFunc("/download/agent/mac", s.withCORS(s.handleDownloadAgentMac))
+	mux.HandleFunc("/download/client", s.withCORS(s.handleDownloadClient))
+	mux.HandleFunc("/download/client/windows", s.withCORS(s.handleDownloadClientWindows))
+	mux.HandleFunc("/download/client/linux", s.withCORS(s.handleDownloadClientLinux))
+	mux.HandleFunc("/download/client/mac", s.withCORS(s.handleDownloadClientMac))
 	mux.HandleFunc("/status", s.withCORS(s.handleStatus))
 	mux.HandleFunc("/", s.handleStaticFiles)
 	fmt.Printf("[Signaling] Server starting on http://%s\n", s.addr)
@@ -181,6 +195,90 @@ func getContentType(path string) string {
 		return "image/x-icon"
 	default:
 		return "application/octet-stream"
+	}
+}
+
+func (s *Server) handleDownloadAgent(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "agent", "")
+}
+
+func (s *Server) handleDownloadAgentWindows(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "agent", "windows")
+}
+
+func (s *Server) handleDownloadAgentLinux(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "agent", "linux")
+}
+
+func (s *Server) handleDownloadAgentMac(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "agent", "darwin")
+}
+
+func (s *Server) handleDownloadClient(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "client", "")
+}
+
+func (s *Server) handleDownloadClientWindows(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "client", "windows")
+}
+
+func (s *Server) handleDownloadClientLinux(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "client", "linux")
+}
+
+func (s *Server) handleDownloadClientMac(w http.ResponseWriter, r *http.Request) {
+	s.handleBinaryDownload(w, r, "client", "darwin")
+}
+
+func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request, name, platform string) {
+	candidates := binaryCandidates(name, platform)
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			filename := filepath.Base(candidate)
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+			http.ServeFile(w, r, candidate)
+			return
+		}
+	}
+	http.Error(w, fmt.Sprintf("%s binary not found, please build it first", name), http.StatusNotFound)
+}
+
+func binaryCandidates(name, platform string) []string {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case "windows", "win":
+		return []string{
+			filepath.Join("bin", name+"-windows-amd64.exe"),
+			filepath.Join("bin", name+".exe"),
+			filepath.Join(".", name+"-windows-amd64.exe"),
+			filepath.Join(".", name+".exe"),
+		}
+	case "linux":
+		return []string{
+			filepath.Join("bin", name+"-linux-amd64"),
+			filepath.Join("bin", name),
+			filepath.Join(".", name+"-linux-amd64"),
+			filepath.Join(".", name),
+		}
+	case "darwin", "mac", "macos":
+		return []string{
+			filepath.Join("bin", name+"-darwin-amd64"),
+			filepath.Join("bin", name),
+			filepath.Join(".", name+"-darwin-amd64"),
+			filepath.Join(".", name),
+		}
+	default:
+		return []string{
+			filepath.Join("bin", name+"-windows-amd64.exe"),
+			filepath.Join("bin", name+"-linux-amd64"),
+			filepath.Join("bin", name+"-darwin-amd64"),
+			filepath.Join("bin", name+".exe"),
+			filepath.Join("bin", name),
+			filepath.Join(".", name+"-windows-amd64.exe"),
+			filepath.Join(".", name+"-linux-amd64"),
+			filepath.Join(".", name+"-darwin-amd64"),
+			filepath.Join(".", name+".exe"),
+			filepath.Join(".", name),
+		}
 	}
 }
 
@@ -539,6 +637,14 @@ func (s *Server) handleAgentSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleControllerList(w http.ResponseWriter, r *http.Request) {
+	s.handleOwnedAgentList(w, r)
+}
+
+func (s *Server) handleClientList(w http.ResponseWriter, r *http.Request) {
+	s.handleOwnedAgentList(w, r)
+}
+
+func (s *Server) handleOwnedAgentList(w http.ResponseWriter, r *http.Request) {
 	_, user, err := s.requireUser(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -564,17 +670,26 @@ func (s *Server) handleControllerList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleControllerConnect(w http.ResponseWriter, r *http.Request) {
+	s.handleOwnedAgentConnect(w, r, "web")
+}
+
+func (s *Server) handleClientConnect(w http.ResponseWriter, r *http.Request) {
+	s.handleOwnedAgentConnect(w, r, "client")
+}
+
+func (s *Server) handleOwnedAgentConnect(w http.ResponseWriter, r *http.Request, kind string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	_, user, err := s.requireUser(r)
+	session, user, err := s.requireUser(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 	var req struct {
 		AgentID string `json:"agent_id"`
+		Force   bool   `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -585,6 +700,12 @@ func (s *Server) handleControllerConnect(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}
+
+	var (
+		prevWS   *websocket.Conn
+		takeover bool
+		busyInfo map[string]interface{}
+	)
 	s.mu.Lock()
 	agent, ok := s.agents[req.AgentID]
 	if !ok {
@@ -592,18 +713,51 @@ func (s *Server) handleControllerConnect(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}
+	if agent.ControllerSessionToken != "" && agent.ControllerSessionToken != session.Token {
+		if !req.Force {
+			busyInfo = map[string]interface{}{
+				"busy":            true,
+				"agent_id":        req.AgentID,
+				"controller_user": agent.ControllerUsername,
+				"controller_kind": agent.ControllerKind,
+			}
+			s.mu.Unlock()
+			writeJSON(w, busyInfo, http.StatusConflict)
+			return
+		}
+		takeover = true
+		prevWS = agent.ControllerWSConn
+	}
 	agent.Connected = true
+	agent.ControllerSessionToken = session.Token
+	agent.ControllerUserID = user.ID
+	agent.ControllerUsername = user.Username
+	agent.ControllerKind = kind
+	agent.ControllerWSConn = nil
 	s.mu.Unlock()
+
+	if takeover {
+		fmt.Printf("[Signaling] Forcing takeover of agent %s by %s (%s)\n", req.AgentID, user.Username, kind)
+		if prevWS != nil {
+			_ = prevWS.Close()
+		}
+		select {
+		case agent.ControllerCh <- &SignalMessage{Type: "disconnect"}:
+		default:
+			fmt.Printf("[Signaling] Agent %s control channel busy, disconnect signal dropped\n", req.AgentID)
+		}
+	}
 	fmt.Printf("[Signaling] Controller connected to agent: %s\n", req.AgentID)
 	resp := map[string]interface{}{
 		"success":  true,
 		"agent_id": req.AgentID,
+		"takeover": takeover,
 	}
 	writeJSON(w, resp, http.StatusOK)
 }
 
 func (s *Server) handleControllerPoll(w http.ResponseWriter, r *http.Request) {
-	_, user, err := s.requireUser(r)
+	session, user, err := s.requireUser(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -623,6 +777,10 @@ func (s *Server) handleControllerPoll(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 	if !ok {
 		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+	if agent.ControllerSessionToken != session.Token {
+		http.Error(w, "Agent is being used by another session", http.StatusConflict)
 		return
 	}
 	ctx := r.Context()
@@ -637,7 +795,7 @@ func (s *Server) handleControllerPoll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleControllerSend(w http.ResponseWriter, r *http.Request) {
-	_, user, err := s.requireUser(r)
+	session, user, err := s.requireUser(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -657,6 +815,10 @@ func (s *Server) handleControllerSend(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 	if !ok {
 		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+	if agent.ControllerSessionToken != session.Token {
+		http.Error(w, "Agent is being used by another session", http.StatusConflict)
 		return
 	}
 	var msg SignalMessage
@@ -673,7 +835,15 @@ func (s *Server) handleControllerSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleControllerWS(w http.ResponseWriter, r *http.Request) {
-	_, user, err := s.requireUser(r)
+	s.handleOwnedAgentWS(w, r, "web")
+}
+
+func (s *Server) handleClientWS(w http.ResponseWriter, r *http.Request) {
+	s.handleOwnedAgentWS(w, r, "client")
+}
+
+func (s *Server) handleOwnedAgentWS(w http.ResponseWriter, r *http.Request, kind string) {
+	session, user, err := s.requireUser(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -695,6 +865,10 @@ func (s *Server) handleControllerWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}
+	if agent.ControllerSessionToken != session.Token {
+		http.Error(w, "Agent is being used by another session", http.StatusConflict)
+		return
+	}
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
@@ -707,11 +881,21 @@ func (s *Server) handleControllerWS(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	agent.Connected = true
+	agent.ControllerSessionToken = session.Token
+	agent.ControllerUserID = user.ID
+	agent.ControllerUsername = user.Username
+	agent.ControllerKind = kind
+	agent.ControllerWSConn = conn
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		if current, exists := s.agents[agentID]; exists && current == agent {
+		if current, exists := s.agents[agentID]; exists && current == agent && current.ControllerSessionToken == session.Token && current.ControllerWSConn == conn {
 			current.Connected = false
+			current.ControllerSessionToken = ""
+			current.ControllerUserID = ""
+			current.ControllerUsername = ""
+			current.ControllerKind = ""
+			current.ControllerWSConn = nil
 		}
 		s.mu.Unlock()
 	}()

@@ -49,6 +49,18 @@ function showStatus(elementId, message, type) {
     el.classList.remove('hidden');
 }
 
+function showAuthPanel(mode) {
+    const loginTab = document.getElementById('auth-tab-login');
+    const registerTab = document.getElementById('auth-tab-register');
+    const loginPanel = document.getElementById('auth-panel-login');
+    const registerPanel = document.getElementById('auth-panel-register');
+    const isLogin = mode !== 'register';
+    if (loginTab) loginTab.classList.toggle('active', isLogin);
+    if (registerTab) registerTab.classList.toggle('active', !isLogin);
+    if (loginPanel) loginPanel.classList.toggle('hidden', !isLogin);
+    if (registerPanel) registerPanel.classList.toggle('hidden', isLogin);
+}
+
 function getSignalURL() {
     return (document.getElementById('signal-url')?.value.trim() || state.signalURL || window.location.origin || '').replace(/\/+$/, '');
 }
@@ -69,13 +81,70 @@ function updateCurrentUserUI() {
     const agentListUser = document.getElementById('agent-list-user');
     const userHash = document.getElementById('user-hash');
     const agentStartCommand = document.getElementById('agent-start-command');
+    const agentPortsJSON = document.getElementById('agent-ports-json');
+    const agentStartCommandWithPorts = document.getElementById('agent-start-command-with-ports');
+    const clientStartCommand = document.getElementById('client-start-command');
+    const agentDownloadURLWindows = document.getElementById('agent-download-url-windows');
+    const agentDownloadURLLinux = document.getElementById('agent-download-url-linux');
+    const clientDownloadURLWindows = document.getElementById('client-download-url-windows');
+    const clientDownloadURLLinux = document.getElementById('client-download-url-linux');
     if (currentUser) currentUser.textContent = text;
     if (agentListUser) agentListUser.textContent = text;
     if (userHash) userHash.value = state.currentUser?.user_hash || '';
+    const signalURL = getSignalURL() || 'http://127.0.0.1:8443';
+    const hash = state.currentUser?.user_hash || '<user_hash>';
+    const setDownloadLink = (element, url) => {
+        if (!element) return;
+        element.href = url;
+        element.dataset.url = url;
+    };
+    if (agentDownloadURLWindows) {
+        setDownloadLink(agentDownloadURLWindows, `${signalURL}/download/agent/windows`);
+    }
+    if (agentDownloadURLLinux) {
+        setDownloadLink(agentDownloadURLLinux, `${signalURL}/download/agent/linux`);
+    }
+    if (clientDownloadURLWindows) {
+        setDownloadLink(clientDownloadURLWindows, `${signalURL}/download/client/windows`);
+    }
+    if (clientDownloadURLLinux) {
+        setDownloadLink(clientDownloadURLLinux, `${signalURL}/download/client/linux`);
+    }
     if (agentStartCommand) {
-        const signalURL = getSignalURL() || 'http://127.0.0.1:8443';
-        const hash = state.currentUser?.user_hash || '<user_hash>';
         agentStartCommand.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL}`;
+    }
+    if (agentPortsJSON) {
+        agentPortsJSON.value = JSON.stringify({
+            ports: [
+                {
+                    id: 'http',
+                    name: '测试环境',
+                    local_addr: '127.0.0.1:8080',
+                    protocol: 'tcp',
+                    allow_access: true
+                },
+                {
+                    id: 'http2',
+                    name: 'CLAUDE-AI',
+                    local_addr: '172.18.247.29:8082',
+                    protocol: 'tcp',
+                    allow_access: true
+                },
+                {
+                    id: 'mysql',
+                    name: 'Mysql',
+                    local_addr: '192.168.0.152:3306',
+                    protocol: 'tcp',
+                    allow_access: true
+                }
+            ]
+        }, null, 2);
+    }
+    if (agentStartCommandWithPorts) {
+        agentStartCommandWithPorts.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -ports ./ports.json`;
+    }
+    if (clientStartCommand) {
+        clientStartCommand.value = `client -signal ${signalURL} -username ${state.currentUser?.username || '<username>'} -user-password <password>`;
     }
 }
 
@@ -175,7 +244,6 @@ async function loginUser() {
         state.userSessionToken = data.token;
         state.currentUser = data;
         updateCurrentUserUI();
-        document.getElementById('config-card')?.classList.add('hidden');
         document.getElementById('account-card')?.classList.add('hidden');
         document.getElementById('agent-register-card')?.classList.remove('hidden');
         showStatus('login-status', '登录成功', 'success');
@@ -285,11 +353,7 @@ async function connect() {
     try {
         log('连接到信令服务器...');
 
-        const connectRes = await fetch(`${state.signalURL}/controller/connect`, {
-            method: 'POST',
-            headers: buildJSONHeaders(true),
-            body: JSON.stringify({ agent_id: state.agentID })
-        });
+        const connectRes = await claimWebAgentControl(false);
         
         if (!connectRes.ok) throw new Error(`连接失败: ${connectRes.status}`);
         
@@ -315,6 +379,30 @@ async function connect() {
         log(`连接失败: ${err.message}`, 'error');
         showStatus('password-status', `连接失败: ${err.message}`, 'error');
     }
+}
+
+async function claimWebAgentControl(force) {
+    const response = await fetch(`${state.signalURL}/controller/connect`, {
+        method: 'POST',
+        headers: buildJSONHeaders(true),
+        body: JSON.stringify({ agent_id: state.agentID, force: !!force })
+    });
+    if (response.status === 409) {
+        let busy = null;
+        try {
+            busy = await response.json();
+        } catch (e) {}
+        const controllerUser = busy?.controller_user || '其他用户';
+        const controllerKind = busy?.controller_kind || '未知会话';
+        const ok = window.confirm(`当前 Agent 正由 ${controllerUser} (${controllerKind}) 使用，是否强行断开之前的会话？`);
+        if (!ok) {
+            throw new Error('Agent 正在被使用');
+        }
+        const forced = await claimWebAgentControl(true);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return forced;
+    }
+    return response;
 }
 
 async function createPeerConnection() {
@@ -1815,8 +1903,8 @@ function disconnect() {
     } else {
         document.getElementById('agent-register-card')?.classList.add('hidden');
         document.getElementById('agents-card')?.classList.add('hidden');
-        document.getElementById('config-card')?.classList.remove('hidden');
         document.getElementById('account-card')?.classList.remove('hidden');
+        showAuthPanel('login');
     }
     
     log('已断开连接');
@@ -1828,8 +1916,10 @@ window.onload = () => {
     if (signalInput && (!signalInput.value || signalInput.value === 'http://localhost:8443')) {
         signalInput.value = window.location.origin;
     }
+    state.signalURL = getSignalURL();
     log('Web Controller已加载');
-    log('步骤: 1) 登录/注册 2) 登记并选择自己的Agent 3) 输入Agent本地密码连接 4) 发送HTTP请求');
+    log('步骤: 1) 登录/注册 2) 查看用户 Hash 与客户端下载 3) 选择 Agent 并输入本地密码连接 4) 发送 HTTP 请求');
+    showAuthPanel('login');
     const selector = document.getElementById('http-port');
     if (selector) {
         selector.addEventListener('change', (event) => {
@@ -1857,3 +1947,15 @@ function backToList() {
     closeConnectModal();
     document.getElementById('agents-card')?.classList.remove('hidden');
 }
+
+window.showAuthPanel = showAuthPanel;
+window.sendEmailCode = sendEmailCode;
+window.registerUser = registerUser;
+window.loginUser = loginUser;
+window.listAgents = listAgents;
+window.selectAgent = selectAgent;
+window.closeConnectModal = closeConnectModal;
+window.connect = connect;
+window.disconnect = disconnect;
+window.clearLogs = clearLogs;
+window.backToList = backToList;

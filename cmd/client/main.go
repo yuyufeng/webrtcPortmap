@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +40,13 @@ type AgentInfo struct {
 	Description string `json:"description"`
 	Online      bool   `json:"online"`
 	Connected   bool   `json:"connected"`
+}
+
+type connectBusyInfo struct {
+	Busy           bool   `json:"busy"`
+	AgentID        string `json:"agent_id"`
+	ControllerUser string `json:"controller_user"`
+	ControllerKind string `json:"controller_kind"`
 }
 
 type localMapSpec struct {
@@ -91,6 +99,18 @@ func normalizeLocalAddr(value string) string {
 	return raw
 }
 
+func splitHostPort(addr string) (string, int, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", 0, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", 0, err
+	}
+	return host, port, nil
+}
+
 type Client struct {
 	signalURL     string
 	username      string
@@ -111,6 +131,7 @@ type Client struct {
 	mapsApplied   bool
 	mapsMu        sync.Mutex
 	inputMu       sync.Mutex
+	mappingPromptStarted bool
 }
 
 func main() {
@@ -284,6 +305,14 @@ func (c *Client) listAgents() ([]AgentInfo, error) {
 }
 
 func (c *Client) connect() error {
+	takeover, err := c.claimAgentControl(false)
+	if err != nil {
+		return err
+	}
+	if takeover {
+		fmt.Printf("[Client] Waiting for previous session to close...\n")
+		time.Sleep(500 * time.Millisecond)
+	}
 	if err := c.connectSignalWS(); err != nil {
 		return err
 	}
@@ -304,7 +333,10 @@ func (c *Client) connect() error {
 			Candidate: &init,
 		})
 	})
-	peer.SetOnMessage(c.handleMessage)
+	peer.SetOnMessage(func(data []byte) {
+		fmt.Printf("[Client] Raw data channel message: %d bytes\n", len(data))
+		c.handleMessage(data)
+	})
 	peer.SetOnDataChannelOpen(func() {
 		fmt.Printf("[Client] Data channel opened, starting authentication...\n")
 		if err := c.startAuthentication(); err != nil {
@@ -324,6 +356,51 @@ func (c *Client) connect() error {
 	}
 	fmt.Printf("[Client] WebRTC offer sent, waiting for answer...\n")
 	return nil
+}
+
+func (c *Client) claimAgentControl(force bool) (bool, error) {
+	body := map[string]interface{}{
+		"agent_id": c.agentID,
+		"force":    force,
+	}
+	data, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, c.signalURL+"/client/connect", bytes.NewReader(data))
+	req.Header.Set("Authorization", "Bearer "+c.sessionToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		var busy connectBusyInfo
+		if err := json.NewDecoder(resp.Body).Decode(&busy); err != nil {
+			return false, fmt.Errorf("agent is busy")
+		}
+		answer := strings.ToLower(strings.TrimSpace(c.promptLine(
+			fmt.Sprintf("Agent %s 当前正由 %s (%s) 使用，是否强行断开之前的会话？[y/N]: ",
+				busy.AgentID, busy.ControllerUser, busy.ControllerKind))))
+		if answer == "y" || answer == "yes" {
+			return c.claimAgentControl(true)
+		}
+		return false, fmt.Errorf("agent is busy")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var msg bytes.Buffer
+		_, _ = msg.ReadFrom(resp.Body)
+		return false, fmt.Errorf("connect claim failed: status %d: %s", resp.StatusCode, strings.TrimSpace(msg.String()))
+	}
+
+	var result struct {
+		Success  bool `json:"success"`
+		Takeover bool `json:"takeover"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+	return result.Takeover, nil
 }
 
 func (c *Client) connectSignalWS() error {
@@ -408,6 +485,11 @@ func (c *Client) handleMessage(data []byte) {
 	}
 
 	switch msg.Type {
+	case protocol.MsgTypeConnectResp, protocol.MsgTypeHalfCloseStream, protocol.MsgTypeData, protocol.MsgTypeCloseStream:
+		fmt.Printf("[Client] Received tunnel message type=%s payload=%d bytes\n", msg.Type.String(), len(msg.Payload))
+	}
+
+	switch msg.Type {
 	case protocol.MsgTypeAgentConfig:
 		var cfg protocol.AgentConfig
 		if err := json.Unmarshal(msg.Payload, &cfg); err != nil {
@@ -421,13 +503,13 @@ func (c *Client) handleMessage(data []byte) {
 				fmt.Printf("  - %s (%s): %s\n", p.Name, p.ID, p.LocalAddr)
 			}
 		}
-		c.applyMappings()
+		go c.applyMappings()
 	case protocol.MsgTypeConnectResp:
 		if err := c.tunnelMgr.HandleConnectResponse(msg.Payload); err != nil {
 			fmt.Printf("[Client] Connect response failed: %v\n", err)
 		}
 	case protocol.MsgTypeHalfCloseStream:
-		if err := c.tunnelMgr.HandleCloseStream(msg.Payload); err != nil {
+		if err := c.tunnelMgr.HandleHalfCloseStream(msg.Payload); err != nil {
 			fmt.Printf("[Client] Half-close stream failed: %v\n", err)
 		}
 	case protocol.MsgTypeData:
@@ -484,6 +566,10 @@ func (c *Client) applyMappings() {
 	if c.agentConfig == nil {
 		return
 	}
+	if c.mappingPromptStarted {
+		return
+	}
+	c.mappingPromptStarted = true
 	if len(c.maps) == 0 {
 		c.promptMappings()
 	}
@@ -524,6 +610,15 @@ func (c *Client) promptMappings() {
 		return
 	}
 
+	mode := strings.ToLower(strings.TrimSpace(c.promptLine("选择映射方式：1) 默认全部映射  2) 自定义映射  （直接回车默认）: ")))
+	if mode == "" || mode == "1" || mode == "default" || mode == "d" {
+		c.maps = append(c.maps, c.buildDefaultMappings(available)...)
+		for _, mapping := range c.maps {
+			fmt.Printf("[Client] 默认映射计划: %s -> %s\n", mapping.LocalAddr, mapping.PortID)
+		}
+		return
+	}
+
 	for {
 		fmt.Println("[Client] 可映射的服务：")
 		for i, port := range available {
@@ -548,16 +643,85 @@ func (c *Client) promptMappings() {
 				fmt.Println("[Client] 本地端口不能为空")
 				continue
 			}
-			mapID := selected.ID + "@" + local
-			if err := c.tunnelMgr.AddMap(local, selected.LocalAddr, selected.Protocol, mapID); err != nil {
-				fmt.Printf("[Client] 本地端口不可用，请重新指定: %v\n", err)
+			if c.hasMappingForLocal(local) {
+				fmt.Println("[Client] 本地端口已在当前计划中使用，请重新指定")
 				continue
 			}
 			c.maps = append(c.maps, localMapSpec{LocalAddr: local, PortID: selected.ID})
-			fmt.Printf("[Client] Local mapping ready: %s -> %s (%s)\n", local, selected.LocalAddr, selected.Name)
+			fmt.Printf("[Client] 已加入映射计划: %s -> %s (%s)\n", local, selected.LocalAddr, selected.Name)
 			break
 		}
 	}
+}
+
+func (c *Client) hasMappingForLocal(local string) bool {
+	for _, mapping := range c.maps {
+		if mapping.LocalAddr == local {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) buildDefaultMappings(ports []protocol.PortInfo) []localMapSpec {
+	result := make([]localMapSpec, 0, len(ports))
+	used := make(map[string]struct{})
+	for _, port := range ports {
+		addr := c.nextDefaultLocalAddr(port, used)
+		used[addr] = struct{}{}
+		result = append(result, localMapSpec{
+			LocalAddr: addr,
+			PortID:    port.ID,
+		})
+	}
+	return result
+}
+
+func (c *Client) nextDefaultLocalAddr(port protocol.PortInfo, used map[string]struct{}) string {
+	host := "127.0.0.1"
+	basePort := c.defaultPortForService(port)
+	for i := 0; i < 100; i++ {
+		addr := fmt.Sprintf("%s:%d", host, basePort+i)
+		if _, exists := used[addr]; exists {
+			continue
+		}
+		if !c.canListen(addr) {
+			continue
+		}
+		return addr
+	}
+	return fmt.Sprintf("%s:%d", host, basePort)
+}
+
+func (c *Client) defaultPortForService(port protocol.PortInfo) int {
+	id := strings.ToLower(strings.TrimSpace(port.ID))
+	name := strings.ToLower(strings.TrimSpace(port.Name))
+	switch {
+	case id == "http" || strings.Contains(name, "http"):
+		return 18080
+	case id == "https" || strings.Contains(name, "https"):
+		return 18443
+	case id == "mysql" || strings.Contains(name, "mysql"):
+		return 13306
+	}
+
+	_, remotePort, err := splitHostPort(port.LocalAddr)
+	if err == nil && remotePort > 0 {
+		if remotePort < 10000 {
+			return remotePort + 10000
+		}
+		return remotePort
+	}
+	return 18000
+}
+
+func (c *Client) canListen(addr string) bool {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
 }
 
 func (c *Client) SendMessage(msg *protocol.Message) error {

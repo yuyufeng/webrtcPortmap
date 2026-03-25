@@ -84,6 +84,28 @@
             gap: 10px;
             align-items: end;
         }
+        .auth-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+        .auth-tab {
+            padding: 8px 14px;
+            border-radius: 999px;
+            border: 1px solid #d0d7de;
+            background: #f8fafc;
+            color: #475569;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .auth-tab.active {
+            background: #4CAF50;
+            border-color: #4CAF50;
+            color: #fff;
+        }
+        .auth-panel.hidden {
+            display: none !important;
+        }
         .inline-actions .btn {
             flex: 0 0 auto;
         }
@@ -91,6 +113,77 @@
             font-size: 13px;
             color: #666;
             margin-bottom: 12px;
+        }
+        .intro-card {
+            background: linear-gradient(135deg, #f8fbff 0%, #eef7ff 100%);
+            border: 1px solid #d8e9ff;
+        }
+        .intro-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(280px, 1fr));
+            gap: 14px;
+        }
+        .intro-item {
+            padding: 12px 14px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid #e7f0fa;
+        }
+        .intro-item-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #334155;
+            margin-bottom: 6px;
+        }
+        .intro-item-text {
+            font-size: 13px;
+            color: #5b6470;
+            line-height: 1.6;
+        }
+        .download-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(220px, 1fr));
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+        .download-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 12px;
+            border: 1px solid #e5e5e5;
+            border-radius: 8px;
+            background: #fff;
+        }
+        .download-group-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #555;
+        }
+        .download-links {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .download-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 38px;
+            height: 38px;
+            border-radius: 10px;
+            border: 1px solid #d9e2ec;
+            background: #f8fafc;
+            color: #334155;
+            text-decoration: none;
+            font-size: 18px;
+            transition: all 0.2s ease;
+        }
+        .download-link:hover {
+            background: #eef6ff;
+            border-color: #90caf9;
+            color: #1565c0;
         }
         .logs {
             background: #1e1e1e;
@@ -349,6 +442,9 @@
             .auth-grid {
                 grid-template-columns: 1fr;
             }
+            .intro-grid {
+                grid-template-columns: 1fr;
+            }
             .compact-toolbar {
                 grid-template-columns: 120px 1fr;
             }
@@ -389,56 +485,71 @@
         <h1>🌐 WebRTC PortMap - HTTP Web Console</h1>
         <p class="subtitle">通过 WebRTC P2P 连接访问 Agent 本地 HTTP 服务</p>
 
-        <div class="card" id="config-card">
-            <h2>🔌 步骤1: 配置信令服务器</h2>
-            <div class="form-group">
-                <label>信令服务器 URL</label>
-                <input type="text" id="signal-url" placeholder="http://localhost:8443" value="http://localhost:8443">
+        <input type="hidden" id="signal-url" value="">
+
+        <div class="card intro-card">
+            <h2>✨ 功能说明</h2>
+            <div class="intro-grid">
+                服务在内网无法访问使用，并不需要公网访问，给自己准备一个随到随用的途径。比如将openclaw的控制端带到任何地方。
+                <div class="intro-item">
+                    <div class="intro-item-title">方便：轻量级Web穿透，无需安装任何软件即可访问内网服务</div>
+                    <div class="intro-item-text">将内网的web服务映射到web Console，用于快速验证服务和管理内部网络，不再需要VPN，端口映射</div>
+                </div>
+                <div class="intro-item">
+                    <div class="intro-item-title">高能：基于webRtc的端口映射，免去访问内网服务要安装VPN的痛苦</div>
+                    <div class="intro-item-text">下载独立 Client 后，可将 Agent 服务映射到本地端口，按原始 TCP 方式访问，适合数据库、SSH 或本地开发工具直连。</div>
+                </div>
+                <div class="intro-item">
+                    <div class="intro-item-title">安全：本地密码鉴权，所有数据P2P不通过服务端转发</div>
+                    <div class="intro-item-text">Agent 本地密码只在 WebRTC DataChannel 建立后用于端到端鉴权，服务端不保存该密码，信令服务只做握手不做转发。</div>
+                </div>
+   
             </div>
-            <div class="toolbar-note">Controller 侧通过用户名密码登录；Agent 侧仍保持本地密码鉴权。</div>
         </div>
 
         <div class="card" id="account-card">
-            <h2>👤 步骤2: 用户登录 / 注册</h2>
-            <div class="auth-grid">
-                <div class="details-card" style="margin-top: 0;">
-                    <div class="details-body" style="padding-top: 14px;">
-                        <div class="form-group">
-                            <label>用户名</label>
-                            <input type="text" id="login-username" placeholder="输入用户名">
-                        </div>
-                        <div class="form-group">
-                            <label>密码</label>
-                            <input type="password" id="login-password" placeholder="输入密码">
-                        </div>
-                        <div id="login-status"></div>
-                        <button class="btn btn-primary" onclick="loginUser()">登录并查看我的 Agent</button>
+            <h2>👤 用户登录 / 注册</h2>
+            <div class="auth-tabs">
+                <button class="auth-tab active" type="button" id="auth-tab-login" onclick="showAuthPanel('login')">登录</button>
+                <button class="auth-tab" type="button" id="auth-tab-register" onclick="showAuthPanel('register')">注册</button>
+            </div>
+            <div class="details-card auth-panel" id="auth-panel-login" style="margin-top: 0;">
+                <div class="details-body" style="padding-top: 14px;">
+                    <div class="form-group">
+                        <label>用户名</label>
+                        <input type="text" id="login-username" placeholder="输入用户名">
                     </div>
+                    <div class="form-group">
+                        <label>密码</label>
+                        <input type="password" id="login-password" placeholder="输入密码">
+                    </div>
+                    <div id="login-status"></div>
+                    <button class="btn btn-primary" onclick="loginUser()">登录并查看我的 Agent</button>
                 </div>
-                <div class="details-card" style="margin-top: 0;">
-                    <div class="details-body" style="padding-top: 14px;">
-                        <div class="form-group">
-                            <label>用户名</label>
-                            <input type="text" id="register-username" placeholder="输入用户名">
-                        </div>
-                        <div class="form-group">
-                            <label>邮箱</label>
-                            <input type="email" id="register-email" placeholder="name@example.com">
-                        </div>
-                        <div class="form-group">
-                            <label>密码</label>
-                            <input type="password" id="register-password" placeholder="输入密码">
-                        </div>
-                        <div class="form-group">
-                            <label>邮箱验证码（如启用）</label>
-                            <div class="inline-actions">
-                                <input type="text" id="register-code" placeholder="6位验证码">
-                                <button class="btn btn-secondary" type="button" onclick="sendEmailCode()">发送验证码</button>
-                            </div>
-                        </div>
-                        <div id="register-status"></div>
-                        <button class="btn btn-primary" onclick="registerUser()">注册用户</button>
+            </div>
+            <div class="details-card auth-panel hidden" id="auth-panel-register" style="margin-top: 0;">
+                <div class="details-body" style="padding-top: 14px;">
+                    <div class="form-group">
+                        <label>用户名</label>
+                        <input type="text" id="register-username" placeholder="输入用户名">
                     </div>
+                    <div class="form-group">
+                        <label>邮箱</label>
+                        <input type="email" id="register-email" placeholder="name@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>密码</label>
+                        <input type="password" id="register-password" placeholder="输入密码">
+                    </div>
+                    <div class="form-group hidden" id="register-code-group">
+                        <label>邮箱验证码</label>
+                        <div class="inline-actions">
+                            <input type="text" id="register-code" placeholder="6位验证码">
+                            <button class="btn btn-secondary" type="button" onclick="sendEmailCode()">发送验证码</button>
+                        </div>
+                    </div>
+                    <div id="register-status"></div>
+                    <button class="btn btn-primary" onclick="registerUser()">注册用户</button>
                 </div>
             </div>
         </div>
@@ -454,9 +565,39 @@
                         <input type="text" id="user-hash" readonly>
                     </div>
                     <div class="toolbar-note">将这个 hash 带给 agent。agent 首次上线时会自动挂到当前账户名下，以后在线显示在线，不在线显示离线。</div>
+                    <div class="download-grid">
+                        <div class="download-group">
+                            <div class="download-group-title">Agent 下载</div>
+                            <div class="download-links">
+                                <a id="agent-download-url-windows" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Windows Agent">Win</a>
+                                <a id="agent-download-url-linux" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Linux Agent">🐧</a>
+                                <a id="agent-download-url-mac" class="download-link" href="#" target="_blank" rel="noopener" title="下载 macOS Agent">🍎</a>
+                            </div>
+                        </div>
+                        <div class="download-group">
+                            <div class="download-group-title">Client 下载</div>
+                            <div class="download-links">
+                                <a id="client-download-url-windows" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Windows Client">Win</a>
+                                <a id="client-download-url-linux" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Linux Client">🐧</a>
+                                <a id="client-download-url-mac" class="download-link" href="#" target="_blank" rel="noopener" title="下载 macOS Client">🍎</a>
+                            </div>
+                        </div>
+                    </div>
                     <div class="form-group">
                         <label>Agent 启动示例</label>
                         <textarea id="agent-start-command" rows="4" readonly></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Agent 端口配置示例（ports.json）</label>
+                        <textarea id="agent-ports-json" rows="12" readonly></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Agent 启动示例（带配置文件）</label>
+                        <textarea id="agent-start-command-with-ports" rows="4" readonly></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Client 访问示例</label>
+                        <textarea id="client-start-command" rows="4" readonly></textarea>
                     </div>
                 </div>
             </details>

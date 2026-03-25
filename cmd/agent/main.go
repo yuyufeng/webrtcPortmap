@@ -384,6 +384,9 @@ func (a *Agent) pollMessage(ctx context.Context) (*SignalMessage, error) {
 // handleSignalingMessage 处理信令消息
 func (a *Agent) handleSignalingMessage(msg *SignalMessage) {
 	switch msg.Type {
+	case "disconnect":
+		fmt.Printf("[Agent] Received disconnect signal, closing current session\n")
+		a.cleanup()
 	case "offer":
 		if msg.SDP != nil {
 			a.handleOffer(msg.SDP)
@@ -401,9 +404,15 @@ func (a *Agent) handleSignalingMessage(msg *SignalMessage) {
 func (a *Agent) handleOffer(offer *webrtc.SessionDescription) {
 	fmt.Printf("[Agent] Received offer, creating answer...\n")
 
-	// 新的 WebRTC 会话开始前，先清理旧 peer / 认证状态，避免旧连接状态污染新会话。
+	// agent 只允许一个活跃控制会话，新的 offer 不再打断旧会话。
+	if a.peer != nil && (a.peer.IsDataChannelOpen() || a.authenticated) {
+		fmt.Printf("[Agent] Rejecting new offer because an active session is already running\n")
+		return
+	}
+
+	// 如果存在未完成/残留的旧会话，再清理后重建。
 	if a.peer != nil || a.authenticated {
-		fmt.Printf("[Agent] Resetting previous session state before handling new offer\n")
+		fmt.Printf("[Agent] Cleaning up stale session before handling new offer\n")
 		a.cleanup()
 	}
 

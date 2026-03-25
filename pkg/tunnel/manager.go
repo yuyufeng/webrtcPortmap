@@ -251,6 +251,7 @@ func (m *Manager) handleLocalConn(ctx context.Context, mapEntry *Map, conn net.C
 
 		// 打包数据消息 [streamID(2) + length(4) + data(n)]
 		data := m.packData(streamID, buf[:n])
+		fmt.Printf("[Tunnel] Forwarding %d bytes from local to remote on stream %d\n", n, streamID)
 		
 		dataMsg := &protocol.Message{
 			Type:    protocol.MsgTypeData,
@@ -258,7 +259,7 @@ func (m *Manager) handleLocalConn(ctx context.Context, mapEntry *Map, conn net.C
 		}
 
 		if err := m.handler.SendMessage(dataMsg); err != nil {
-			fmt.Printf("[Tunnel] Failed to send data: %v\n", err)
+			fmt.Printf("[Tunnel] Failed to send data on stream %d: %v\n", streamID, err)
 			break
 		}
 	}
@@ -289,12 +290,14 @@ func (m *Manager) HandleDataMessage(payload []byte) error {
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		return err
 	}
+	fmt.Printf("[Tunnel] Received %d bytes from remote for stream %d\n", len(msg.Data), msg.StreamID)
 
 	m.streamMu.RLock()
 	stream, exists := m.streams[msg.StreamID]
 	m.streamMu.RUnlock()
 
 	if !exists {
+		fmt.Printf("[Tunnel] Drop remote data for missing stream %d\n", msg.StreamID)
 		return fmt.Errorf("stream %d not found", msg.StreamID)
 	}
 
@@ -303,6 +306,7 @@ func (m *Manager) HandleDataMessage(payload []byte) error {
 		m.closeStream(msg.StreamID)
 		return err
 	}
+	fmt.Printf("[Tunnel] Wrote %d bytes from remote to local on stream %d\n", len(msg.Data), msg.StreamID)
 
 	return nil
 }
@@ -326,6 +330,10 @@ func (m *Manager) HandleConnectResponse(payload []byte) error {
 
 // closeStream 关闭流
 func (m *Manager) closeStream(streamID uint16) {
+	m.closeStreamWithNotify(streamID, true)
+}
+
+func (m *Manager) closeStreamWithNotify(streamID uint16, notifyRemote bool) {
 	m.streamMu.Lock()
 	stream, exists := m.streams[streamID]
 	if exists {
@@ -352,13 +360,15 @@ func (m *Manager) closeStream(streamID uint16) {
 		mapEntry.mu.Unlock()
 	}
 
-	// 发送关闭消息给对端
-	closeMsg := protocol.StreamClose{
-		StreamID: streamID,
-		Reason:   "local closed",
+	if notifyRemote {
+		// 发送关闭消息给对端
+		closeMsg := protocol.StreamClose{
+			StreamID: streamID,
+			Reason:   "local closed",
+		}
+		msg, _ := protocol.NewMessage(protocol.MsgTypeCloseStream, closeMsg)
+		m.handler.SendMessage(msg)
 	}
-	msg, _ := protocol.NewMessage(protocol.MsgTypeCloseStream, closeMsg)
-	m.handler.SendMessage(msg)
 
 	fmt.Printf("[Tunnel] Stream %d closed\n", streamID)
 }
@@ -385,6 +395,31 @@ func (m *Manager) HandleCloseStream(payload []byte) error {
 	}
 
 	fmt.Printf("[Tunnel] Received close for stream %d: %s\n", closeMsg.StreamID, closeMsg.Reason)
-	m.closeStream(closeMsg.StreamID)
+	m.closeStreamWithNotify(closeMsg.StreamID, false)
+	return nil
+}
+
+// HandleHalfCloseStream 处理流半关闭消息，只关闭本地连接写方向，保留读方向继续接收剩余数据。
+func (m *Manager) HandleHalfCloseStream(payload []byte) error {
+	var halfClose protocol.StreamHalfClose
+	if err := json.Unmarshal(payload, &halfClose); err != nil {
+		return err
+	}
+
+	m.streamMu.RLock()
+	stream, exists := m.streams[halfClose.StreamID]
+	m.streamMu.RUnlock()
+	if !exists {
+		fmt.Printf("[Tunnel] Ignore half-close for missing stream %d\n", halfClose.StreamID)
+		return nil
+	}
+
+	if tcpConn, ok := stream.Conn.(*net.TCPConn); ok {
+		fmt.Printf("[Tunnel] Received half-close for stream %d, closing local write side\n", halfClose.StreamID)
+		return tcpConn.CloseWrite()
+	}
+
+	fmt.Printf("[Tunnel] Received half-close for stream %d, tcp half-close unsupported, closing stream\n", halfClose.StreamID)
+	m.closeStream(halfClose.StreamID)
 	return nil
 }
