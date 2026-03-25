@@ -66,12 +66,32 @@
         .agent-item:hover { background: #f9f9f9; }
         .agent-info { flex: 1; }
         .agent-id { font-weight: bold; color: #333; font-size: 16px; }
+        .agent-name { font-weight: 600; color: #333; font-size: 16px; }
         .agent-status { font-size: 12px; color: #666; margin-top: 4px; }
         .agent-status.online { color: #4CAF50; }
         .flex { display: flex; gap: 10px; }
+        .stack { display: flex; flex-direction: column; gap: 12px; }
         .hidden { display: none !important; }
         .text-center { text-align: center; }
         .mt-4 { margin-top: 20px; }
+        .auth-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(320px, 1fr));
+            gap: 16px;
+        }
+        .inline-actions {
+            display: flex;
+            gap: 10px;
+            align-items: end;
+        }
+        .inline-actions .btn {
+            flex: 0 0 auto;
+        }
+        .current-user {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 12px;
+        }
         .logs {
             background: #1e1e1e;
             color: #d4d4d4;
@@ -175,6 +195,150 @@
             border-radius: 6px;
             background: white;
         }
+        .preview-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(12, 18, 28, 0.72);
+            display: flex;
+            align-items: stretch;
+            justify-content: stretch;
+            padding: 16px;
+            z-index: 1000;
+        }
+        .preview-modal.hidden {
+            display: none !important;
+        }
+        .preview-modal-dialog {
+            background: #fff;
+            border-radius: 10px;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            box-shadow: 0 18px 60px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+        }
+        .preview-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid #e5e5e5;
+            background: #f8fafc;
+        }
+        .preview-modal-title {
+            font-size: 14px;
+            color: #555;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .preview-modal-toolbar {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+        .preview-modal-nav {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .preview-modal-nav button {
+            border: none;
+            background: #e2e8f0;
+            color: #334155;
+            border-radius: 4px;
+            cursor: pointer;
+            padding: 8px 12px;
+            font-size: 13px;
+        }
+        .preview-modal-nav button:disabled {
+            cursor: default;
+            opacity: 0.45;
+        }
+        .preview-modal-path {
+            flex: 1;
+            min-width: 0;
+            padding: 8px 10px;
+            border: 1px solid #d5dbe3;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .preview-modal-service {
+            min-width: 220px;
+            max-width: 320px;
+            padding: 8px 10px;
+            border: 1px solid #d5dbe3;
+            border-radius: 4px;
+            font-size: 13px;
+            background: white;
+        }
+        .preview-modal-go {
+            border: none;
+            background: #2196F3;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            padding: 8px 14px;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .preview-modal-close {
+            border: none;
+            background: #f44336;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            padding: 8px 14px;
+            font-size: 13px;
+        }
+        .preview-modal-frame {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            background: white;
+            flex: 1;
+        }
+        .connect-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(12, 18, 28, 0.52);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            z-index: 1100;
+        }
+        .connect-modal.hidden {
+            display: none !important;
+        }
+        .connect-modal-dialog {
+            width: min(460px, 100%);
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+            padding: 18px;
+        }
+        .connect-modal-title {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 8px;
+        }
+        .connect-modal-subtitle {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 14px;
+            word-break: break-all;
+        }
+        .connect-modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 14px;
+        }
         #logs-card details[open] .logs {
             margin-top: 0;
         }
@@ -182,6 +346,9 @@
             margin-top: 12px;
         }
         @media (max-width: 1200px) {
+            .auth-grid {
+                grid-template-columns: 1fr;
+            }
             .compact-toolbar {
                 grid-template-columns: 120px 1fr;
             }
@@ -228,34 +395,78 @@
                 <label>信令服务器 URL</label>
                 <input type="text" id="signal-url" placeholder="http://localhost:8443" value="http://localhost:8443">
             </div>
-            <div class="form-group">
-                <label>信令服务器 Token (可选)</label>
-                <input type="password" id="signal-token" placeholder="如果需要鉴权则填写">
+            <div class="toolbar-note">Controller 侧通过用户名密码登录；Agent 侧仍保持本地密码鉴权。</div>
+        </div>
+
+        <div class="card" id="account-card">
+            <h2>👤 步骤2: 用户登录 / 注册</h2>
+            <div class="auth-grid">
+                <div class="details-card" style="margin-top: 0;">
+                    <div class="details-body" style="padding-top: 14px;">
+                        <div class="form-group">
+                            <label>用户名</label>
+                            <input type="text" id="login-username" placeholder="输入用户名">
+                        </div>
+                        <div class="form-group">
+                            <label>密码</label>
+                            <input type="password" id="login-password" placeholder="输入密码">
+                        </div>
+                        <div id="login-status"></div>
+                        <button class="btn btn-primary" onclick="loginUser()">登录并查看我的 Agent</button>
+                    </div>
+                </div>
+                <div class="details-card" style="margin-top: 0;">
+                    <div class="details-body" style="padding-top: 14px;">
+                        <div class="form-group">
+                            <label>用户名</label>
+                            <input type="text" id="register-username" placeholder="输入用户名">
+                        </div>
+                        <div class="form-group">
+                            <label>邮箱</label>
+                            <input type="email" id="register-email" placeholder="name@example.com">
+                        </div>
+                        <div class="form-group">
+                            <label>密码</label>
+                            <input type="password" id="register-password" placeholder="输入密码">
+                        </div>
+                        <div class="form-group">
+                            <label>邮箱验证码（如启用）</label>
+                            <div class="inline-actions">
+                                <input type="text" id="register-code" placeholder="6位验证码">
+                                <button class="btn btn-secondary" type="button" onclick="sendEmailCode()">发送验证码</button>
+                            </div>
+                        </div>
+                        <div id="register-status"></div>
+                        <button class="btn btn-primary" onclick="registerUser()">注册用户</button>
+                    </div>
+                </div>
             </div>
-            <button class="btn btn-primary" onclick="listAgents()">查看在线Agent</button>
+        </div>
+
+        <div class="card hidden" id="agent-register-card">
+            <h2>🧾 步骤3: 登记agent</h2>
+            <div class="current-user" id="current-user"></div>
+            <details class="details-card" style="margin-top: 0;">
+                <summary>查看用户 Hash 和 Agent 启动命令</summary>
+                <div class="details-body">
+                    <div class="form-group">
+                        <label>用户唯一 Hash</label>
+                        <input type="text" id="user-hash" readonly>
+                    </div>
+                    <div class="toolbar-note">将这个 hash 带给 agent。agent 首次上线时会自动挂到当前账户名下，以后在线显示在线，不在线显示离线。</div>
+                    <div class="form-group">
+                        <label>Agent 启动示例</label>
+                        <textarea id="agent-start-command" rows="4" readonly></textarea>
+                    </div>
+                </div>
+            </details>
         </div>
 
         <div class="card hidden" id="agents-card">
-            <h2>📋 步骤2: 选择Agent</h2>
+            <h2>📋 步骤4: 选择我的 Agent</h2>
+            <div class="current-user" id="agent-list-user"></div>
             <ul class="agent-list" id="agent-list"></ul>
             <button class="btn btn-secondary mt-4" onclick="listAgents()">刷新列表</button>
-        </div>
-
-        <div class="card hidden" id="password-card">
-            <h2>🔐 步骤3: 输入密码鉴权</h2>
-            <div class="form-group">
-                <label>Agent ID</label>
-                <input type="text" id="agent-id" readonly>
-            </div>
-            <div class="form-group">
-                <label>Agent 密码</label>
-                <input type="password" id="agent-password" placeholder="输入Agent的访问密码">
-            </div>
-            <div id="password-status"></div>
-            <div class="flex">
-                <button class="btn btn-primary" onclick="connect()">连接并鉴权</button>
-                <button class="btn btn-secondary" onclick="backToList()">返回列表</button>
-            </div>
         </div>
 
         <div class="card hidden" id="http-console-card">
@@ -329,12 +540,6 @@ Accept: text/html,application/xhtml+xml</textarea>
                 </div>
             </details>
 
-            <div class="preview-panel">
-                <div class="preview-header">
-                    <h3>HTML 预览</h3>
-                </div>
-                <iframe id="http-response-preview" class="response-iframe hidden"></iframe>
-            </div>
         </div>
 
         <div class="card" id="logs-card">
@@ -345,6 +550,41 @@ Accept: text/html,application/xhtml+xml</textarea>
                     <button class="btn btn-secondary mt-4" onclick="clearLogs()">清空</button>
                 </div>
             </details>
+        </div>
+    </div>
+
+    <div class="preview-modal hidden" id="preview-modal">
+        <div class="preview-modal-dialog">
+            <div class="preview-modal-header">
+                <div class="preview-modal-toolbar">
+                    <div class="preview-modal-title" id="preview-modal-title">HTML 预览</div>
+                    <div class="preview-modal-nav">
+                        <button type="button" id="preview-back-btn" onclick="navigatePreviewHistory(-1)">后退</button>
+                        <button type="button" id="preview-forward-btn" onclick="navigatePreviewHistory(1)">前进</button>
+                    </div>
+                    <select id="preview-modal-service" class="preview-modal-service"></select>
+                    <input type="text" id="preview-modal-path" class="preview-modal-path" placeholder="/">
+                    <button class="preview-modal-go" type="button" onclick="navigatePreviewModal()">跳转</button>
+                </div>
+                <button class="preview-modal-close" type="button" onclick="closePreviewModal()">关闭</button>
+            </div>
+            <iframe id="preview-modal-frame" class="preview-modal-frame"></iframe>
+        </div>
+    </div>
+
+    <div class="connect-modal hidden" id="connect-modal">
+        <div class="connect-modal-dialog">
+            <div class="connect-modal-title">连接 Agent</div>
+            <div class="connect-modal-subtitle" id="connect-modal-agent"></div>
+            <div class="form-group">
+                <label>Agent 本地密码</label>
+                <input type="password" id="agent-password" placeholder="输入 Agent 的本地密码">
+            </div>
+            <div id="password-status"></div>
+            <div class="connect-modal-actions">
+                <button class="btn btn-secondary" type="button" onclick="closeConnectModal()">取消</button>
+                <button class="btn btn-primary" type="button" onclick="connect()">连接并鉴权</button>
+            </div>
         </div>
     </div>
 

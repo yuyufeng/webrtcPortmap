@@ -42,6 +42,8 @@ type wsProxyConn struct {
 
 type Agent struct {
 	id        string
+	displayName string
+	ownerHash string
 	password  string
 	sigURL    string
 	sigToken  string
@@ -52,6 +54,7 @@ type Agent struct {
 	peer        *wr.Peer
 	handshaker  *auth.Handshaker
 	tunnelMgr   *tunnel.Manager
+	clientTunnel *tunnel.ClientManager
 	
 	authenticated bool
 	stopChan      chan struct{}
@@ -61,36 +64,47 @@ type Agent struct {
 
 	wsMu    sync.RWMutex
 	wsConns map[string]*wsProxyConn
+
+	reconnectMu      sync.Mutex
+	reconnectRunning bool
 }
 
 func main() {
 	var (
-		id        = flag.String("id", "", "Agent ID (required)")
-		password  = flag.String("password", "", "Password (required)")
-		sigURL    = flag.String("signal", "http://localhost:8443", "Signaling server URL")
-		sigToken  = flag.String("signal-token", "", "Signaling server auth token")
-		stun      = flag.String("stun", "stun:stun.l.google.com:19302", "STUN server")
-		turn      = flag.String("turn", "", "TURN server URL (optional)")
-		turnUser  = flag.String("turn-user", "", "TURN username")
-		turnPass  = flag.String("turn-pass", "", "TURN password")
-		portsFile = flag.String("ports", "", "Ports config JSON file (optional)")
+		id          = flag.String("id", "", "Agent ID (required)")
+		name        = flag.String("name", "", "Agent display name (optional, defaults to id)")
+		ownerHash   = flag.String("owner-hash", "", "User hash from Web UI (required)")
+		password    = flag.String("password", "", "Local auth password (required)")
+		sigURL      = flag.String("signal", "http://localhost:8443", "Signaling server URL")
+		sigToken    = flag.String("signal-token", "", "Signaling server auth token")
+		stun        = flag.String("stun", "stun:stun.l.google.com:19302", "STUN server")
+		turn        = flag.String("turn", "", "TURN server URL (optional)")
+		turnUser    = flag.String("turn-user", "", "TURN username")
+		turnPass    = flag.String("turn-pass", "", "TURN password")
+		portsFile   = flag.String("ports", "", "Ports config JSON file (optional)")
 	)
 	flag.Parse()
 
-	if *id == "" || *password == "" {
-		fmt.Println("Usage: agent -id <agent_id> -password <password> [-ports <ports.json>]")
+	if *id == "" || *ownerHash == "" || *password == "" {
+		fmt.Println("Usage: agent -id <agent_id> -owner-hash <user_hash> -password <password> [-name <display_name>] [-ports <ports.json>]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
+	displayName := *name
+	if strings.TrimSpace(displayName) == "" {
+		displayName = *id
+	}
 
 	agent := &Agent{
-		id:         *id,
-		password:   *password,
-		sigURL:     *sigURL,
-		sigToken:   *sigToken,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		stopChan:   make(chan struct{}),
-		wsConns:    make(map[string]*wsProxyConn),
+		id:          *id,
+		displayName: displayName,
+		ownerHash:   *ownerHash,
+		password:    *password,
+		sigURL:      *sigURL,
+		sigToken:    *sigToken,
+		httpClient:  &http.Client{Timeout: 10 * time.Second},
+		stopChan:    make(chan struct{}),
+		wsConns:     make(map[string]*wsProxyConn),
 	}
 
 	// 加载端口配置
@@ -121,8 +135,11 @@ func main() {
 
 	// 初始化隧道管理器
 	agent.tunnelMgr = tunnel.NewManager(agent)
+	agent.clientTunnel = tunnel.NewClientManager(agent)
 
 	fmt.Printf("[Agent] ID: %s\n", *id)
+	fmt.Printf("[Agent] Display Name: %s\n", displayName)
+	fmt.Printf("[Agent] Owner Hash: %s\n", *ownerHash)
 	fmt.Printf("[Agent] Configured ports: %d (allow_access=true only)\n", len(agent.ports))
 	for _, p := range agent.ports {
 		if p.AllowAccess {
@@ -132,8 +149,8 @@ func main() {
 	fmt.Printf("[Agent] Signaling server: %s\n", *sigURL)
 	fmt.Printf("[Agent] Press Ctrl+C to exit\n")
 
-	// 注册到信令服务器
-	if err := agent.register(); err != nil {
+	// 注册到信令服务器（带退避重试）
+	if err := agent.registerWithBackoff(); err != nil {
 		fmt.Printf("[Agent] Registration failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -182,9 +199,10 @@ func (a *Agent) loadPortsConfig(filename string) error {
 // register 注册到信令服务器
 func (a *Agent) register() error {
 	reqBody := map[string]string{
-		"id":         a.id,
-		"auth_token": a.sigToken,
-		"agent_key":  a.password,
+		"id":           a.id,
+		"auth_token":   a.sigToken,
+		"owner_hash":   a.ownerHash,
+		"display_name": a.displayName,
 	}
 	data, _ := json.Marshal(reqBody)
 
@@ -199,7 +217,12 @@ func (a *Agent) register() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("register failed: status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("register failed: %s", msg)
 	}
 
 	var result struct {
@@ -215,6 +238,63 @@ func (a *Agent) register() error {
 	return nil
 }
 
+func (a *Agent) registerWithBackoff() error {
+	delay := 1 * time.Second
+	for {
+		select {
+		case <-a.stopChan:
+			return fmt.Errorf("agent is stopping")
+		default:
+		}
+
+		if err := a.register(); err == nil {
+			return nil
+		} else {
+			fmt.Printf("[Agent] Registration failed: %v\n", err)
+		}
+
+		if delay > 5*time.Minute {
+			delay = 5 * time.Minute
+		}
+		fmt.Printf("[Agent] Retry registration in %s\n", delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-a.stopChan:
+			timer.Stop()
+			return fmt.Errorf("agent is stopping")
+		}
+		if delay < 5*time.Minute {
+			delay *= 2
+			if delay > 5*time.Minute {
+				delay = 5 * time.Minute
+			}
+		}
+	}
+}
+
+func (a *Agent) triggerReconnect(reason string) {
+	a.reconnectMu.Lock()
+	if a.reconnectRunning {
+		a.reconnectMu.Unlock()
+		return
+	}
+	a.reconnectRunning = true
+	a.reconnectMu.Unlock()
+
+	go func() {
+		defer func() {
+			a.reconnectMu.Lock()
+			a.reconnectRunning = false
+			a.reconnectMu.Unlock()
+		}()
+		fmt.Printf("[Agent] Reconnect triggered: %s\n", reason)
+		if err := a.registerWithBackoff(); err != nil {
+			fmt.Printf("[Agent] Reconnect stopped: %v\n", err)
+		}
+	}()
+}
+
 // heartbeatLoop 心跳循环
 func (a *Agent) heartbeatLoop() {
 	ticker := time.NewTicker(10 * time.Second)
@@ -228,6 +308,13 @@ func (a *Agent) heartbeatLoop() {
 			resp, err := a.httpClient.Do(req)
 			if err != nil {
 				fmt.Printf("[Agent] Heartbeat failed: %v\n", err)
+				a.triggerReconnect(fmt.Sprintf("heartbeat request failed: %v", err))
+				continue
+			}
+			if resp.StatusCode == http.StatusUnauthorized {
+				resp.Body.Close()
+				fmt.Printf("[Agent] Heartbeat unauthorized, token may be expired\n")
+				a.triggerReconnect("heartbeat unauthorized")
 				continue
 			}
 			resp.Body.Close()
@@ -251,6 +338,9 @@ func (a *Agent) signalingLoop() {
 		cancel()
 
 		if err != nil {
+			if strings.Contains(err.Error(), "status 401") || strings.Contains(strings.ToLower(err.Error()), "unauthorized") {
+				a.triggerReconnect(fmt.Sprintf("poll unauthorized: %v", err))
+			}
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -311,6 +401,12 @@ func (a *Agent) handleSignalingMessage(msg *SignalMessage) {
 func (a *Agent) handleOffer(offer *webrtc.SessionDescription) {
 	fmt.Printf("[Agent] Received offer, creating answer...\n")
 
+	// 新的 WebRTC 会话开始前，先清理旧 peer / 认证状态，避免旧连接状态污染新会话。
+	if a.peer != nil || a.authenticated {
+		fmt.Printf("[Agent] Resetting previous session state before handling new offer\n")
+		a.cleanup()
+	}
+
 	// 创建Peer
 	peer, err := wr.NewPeer(a.config)
 	if err != nil {
@@ -361,9 +457,14 @@ func (a *Agent) sendSignalingMessage(msg *SignalMessage) error {
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
+		a.triggerReconnect(fmt.Sprintf("send signaling failed: %v", err))
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		a.triggerReconnect("send signaling unauthorized")
+		return fmt.Errorf("send signaling unauthorized")
+	}
 	return nil
 }
 
@@ -385,11 +486,28 @@ func (a *Agent) handleDataChannel() {
 	}
 
 	fmt.Printf("[Agent] Data channel opened, waiting for authentication...\n")
+	if a.authenticated {
+		fmt.Printf("[Agent] Data channel already authenticated, re-sending agent config\n")
+		a.sendAgentConfig()
+	}
 }
 
 // handleMessage 处理接收到的消息
 func (a *Agent) handleMessage(data []byte) {
 	fmt.Printf("[Agent] Received message: %s\n", string(data))
+
+	var msg protocol.Message
+	if err := json.Unmarshal(data, &msg); err != nil {
+		fmt.Printf("[Agent] Failed to unmarshal message: %v\n", err)
+		return
+	}
+
+	// 鉴权消息始终优先处理，避免旧 authenticated 状态把新的 challenge 当成普通消息吞掉。
+	switch msg.Type {
+	case protocol.MsgTypeAuthChallenge, protocol.MsgTypeAuthResult:
+		a.handleAuthMessage(data)
+		return
+	}
 	
 	// 未鉴权前，处理鉴权消息
 	if !a.authenticated {
@@ -398,16 +516,30 @@ func (a *Agent) handleMessage(data []byte) {
 	}
 
 	// 鉴权后，处理普通消息
-	var msg protocol.Message
-	if err := json.Unmarshal(data, &msg); err != nil {
-		fmt.Printf("[Agent] Failed to unmarshal message: %v\n", err)
-		return
-	}
-
 	switch msg.Type {
+	case protocol.MsgTypeConnectReq:
+		if err := a.clientTunnel.HandleConnectRequest(msg.Payload); err != nil {
+			fmt.Printf("[Agent] Handle connect request failed: %v\n", err)
+		}
+	case protocol.MsgTypeConnectResp:
+		if err := a.tunnelMgr.HandleConnectResponse(msg.Payload); err != nil {
+			fmt.Printf("[Agent] Handle connect response failed: %v\n", err)
+		}
+	case protocol.MsgTypeHalfCloseStream:
+		if err := a.clientTunnel.HandleHalfCloseStream(msg.Payload); err != nil {
+			fmt.Printf("[Agent] Handle half-close stream failed: %v\n", err)
+		}
+	case protocol.MsgTypeData:
+		if err := a.clientTunnel.HandleDataMessage(msg.Payload); err != nil {
+			fmt.Printf("[Agent] Handle tunnel data failed: %v\n", err)
+		}
+	case protocol.MsgTypeCloseStream:
+		if err := a.clientTunnel.HandleCloseStream(msg.Payload); err != nil {
+			fmt.Printf("[Agent] Handle close stream failed: %v\n", err)
+		}
 	case protocol.MsgTypeAccessPort:
 		a.handleAccessPort(msg.Payload)
-	case 16: // MsgTypeHTTPRequest
+	case protocol.MsgTypeHTTPRequest:
 		go a.handleHTTPRequest(msg.Payload)
 	case protocol.MsgTypeWSOpen:
 		go a.handleWSOpen(msg.Payload)
@@ -454,8 +586,14 @@ func (a *Agent) handleAuthMessage(data []byte) {
 		}
 		a.authenticated = true
 		fmt.Printf("[Agent] Authentication successful\n")
-		// 鉴权成功后发送Agent配置
 		a.sendAgentConfig()
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			if a.authenticated && a.peer != nil && a.peer.IsDataChannelOpen() {
+				fmt.Printf("[Agent] Re-sending agent config after auth stabilization\n")
+				a.sendAgentConfig()
+			}
+		}()
 	}
 }
 
@@ -983,6 +1121,9 @@ func (a *Agent) sendMessage(msg *protocol.Message) error {
 
 // cleanup 清理资源
 func (a *Agent) cleanup() {
+	if a.clientTunnel != nil {
+		a.clientTunnel.CloseAll()
+	}
 	a.wsMu.Lock()
 	for socketID, wsConn := range a.wsConns {
 		wsConn.writeMu.Lock()

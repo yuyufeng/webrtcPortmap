@@ -2,7 +2,7 @@
   "ports": [
     {
       "id": "http",
-      "name": "HTTP Web",
+      "name": "测试环境",
       "local_addr": "127.0.0.1:8080",
       "protocol": "tcp",
       "description": "Web server",
@@ -10,10 +10,18 @@
     },
     {
       "id": "http2",
-      "name": "HTTP Web2",
+      "name": "CLAUDE-AI",
       "local_addr": "172.18.247.29:8082",
       "protocol": "tcp",
-      "description": "Secure web server",
+      "description": "ai控制台",
+      "allow_access": true
+    },
+    {
+      "id": "mysql",
+      "name": "Mysql",
+      "local_addr": "192.168.0.152:3306",
+      "protocol": "tcp",
+      "description": "mysql",
       "allow_access": true
     }
   ]

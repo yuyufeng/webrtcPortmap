@@ -24,6 +24,7 @@ const (
 	MsgTypeData        // 数据流
 	MsgTypeConnectReq  // 连接请求（新建流）
 	MsgTypeConnectResp // 连接响应
+	MsgTypeHalfCloseStream // 半关闭流（关闭写方向）
 	MsgTypeCloseStream // 关闭流
 
 	// Agent配置消息（新架构）
@@ -67,6 +68,8 @@ func (t MessageType) String() string {
 		return "CONNECT_REQ"
 	case MsgTypeConnectResp:
 		return "CONNECT_RESP"
+	case MsgTypeHalfCloseStream:
+		return "HALF_CLOSE_STREAM"
 	case MsgTypeCloseStream:
 		return "CLOSE_STREAM"
 	case MsgTypeAgentConfig:
@@ -189,6 +192,11 @@ type StreamConnectResp struct {
 type StreamClose struct {
 	StreamID uint16 `json:"stream_id"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+// StreamHalfClose 半关闭流（仅关闭写方向）
+type StreamHalfClose struct {
+	StreamID uint16 `json:"stream_id"`
 }
 
 // ErrorMessage 错误消息

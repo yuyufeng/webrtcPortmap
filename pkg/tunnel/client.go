@@ -198,6 +198,30 @@ func (m *ClientManager) HandleCloseStream(payload []byte) error {
 	return nil
 }
 
+// HandleHalfCloseStream 处理半关闭流消息，只关闭写方向，保留读方向接收剩余数据
+func (m *ClientManager) HandleHalfCloseStream(payload []byte) error {
+	var halfClose protocol.StreamHalfClose
+	if err := json.Unmarshal(payload, &halfClose); err != nil {
+		return err
+	}
+
+	m.mu.RLock()
+	stream, exists := m.streams[halfClose.StreamID]
+	m.mu.RUnlock()
+	if !exists || stream.Conn == nil {
+		return fmt.Errorf("stream %d not found", halfClose.StreamID)
+	}
+
+	if tcpConn, ok := stream.Conn.(*net.TCPConn); ok {
+		fmt.Printf("[Client] Half-close write for stream %d\n", halfClose.StreamID)
+		return tcpConn.CloseWrite()
+	}
+
+	// 非 TCPConn 时退化为全关闭
+	fmt.Printf("[Client] Half-close fallback to close for stream %d\n", halfClose.StreamID)
+	return stream.Conn.Close()
+}
+
 // CloseAll 关闭所有流
 func (m *ClientManager) CloseAll() {
 	m.mu.Lock()

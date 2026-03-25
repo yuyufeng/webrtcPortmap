@@ -2,7 +2,8 @@
 
 const state = {
     signalURL: '',
-    signalToken: '',
+    userSessionToken: '',
+    currentUser: null,
     agentID: '',
     agentPassword: '',
     pc: null,
@@ -14,8 +15,14 @@ const state = {
     pendingHTTPRequests: new Map(), // id -> {resolve, reject}
     cookieJar: new Map(), // portID -> Map(name -> cookie)
     wsConnections: new Map(), // socketId -> DcWebSocket
-    currentPreview: null
+    currentPreview: null,
+    previewHistory: [],
+    previewHistoryIndex: -1,
+    selectedAgentName: ''
 };
+
+const DEFAULT_TENANT_CODE = 'convnet';
+const DEFAULT_TENANT_NAME = 'convnet';
 
 // ==================== 日志工具 ====================
 function log(message, type = 'info') {
@@ -42,6 +49,36 @@ function showStatus(elementId, message, type) {
     el.classList.remove('hidden');
 }
 
+function getSignalURL() {
+    return (document.getElementById('signal-url')?.value.trim() || state.signalURL || window.location.origin || '').replace(/\/+$/, '');
+}
+
+function buildJSONHeaders(includeAuth = true) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (includeAuth && state.userSessionToken) {
+        headers.Authorization = `Bearer ${state.userSessionToken}`;
+    }
+    return headers;
+}
+
+function updateCurrentUserUI() {
+    const text = state.currentUser
+        ? `当前用户：${state.currentUser.username}${state.currentUser.email ? ` (${state.currentUser.email})` : ''}`
+        : '';
+    const currentUser = document.getElementById('current-user');
+    const agentListUser = document.getElementById('agent-list-user');
+    const userHash = document.getElementById('user-hash');
+    const agentStartCommand = document.getElementById('agent-start-command');
+    if (currentUser) currentUser.textContent = text;
+    if (agentListUser) agentListUser.textContent = text;
+    if (userHash) userHash.value = state.currentUser?.user_hash || '';
+    if (agentStartCommand) {
+        const signalURL = getSignalURL() || 'http://127.0.0.1:8443';
+        const hash = state.currentUser?.user_hash || '<user_hash>';
+        agentStartCommand.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL}`;
+    }
+}
+
 // ==================== Crypto ====================
 function fnv1a32(input) {
     let hash = 0x811c9dc5;
@@ -65,20 +102,106 @@ async function deriveKey(password, id) {
     return portableHash256(`key|${id}|${password}`);
 }
 
+// ==================== 账号 ====================
+async function sendEmailCode() {
+    const signalURL = getSignalURL();
+    const email = document.getElementById('register-email')?.value.trim() || '';
+    if (!email) {
+        alert('请先输入邮箱');
+        return;
+    }
+    try {
+        const response = await fetch(`${signalURL}/auth/send-code`, {
+            method: 'POST',
+            headers: buildJSONHeaders(false),
+            body: JSON.stringify({ email })
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(text || `发送失败: ${response.status}`);
+        }
+        showStatus('register-status', '验证码已发送，如未配置 SMTP 请查看 signaling 日志输出的验证码', 'success');
+    } catch (err) {
+        log(`发送验证码失败: ${err.message}`, 'error');
+        showStatus('register-status', `发送验证码失败: ${err.message}`, 'error');
+    }
+}
+
+async function registerUser() {
+    const signalURL = getSignalURL();
+    const payload = {
+        tenant_code: DEFAULT_TENANT_CODE,
+        tenant_name: DEFAULT_TENANT_NAME,
+        username: document.getElementById('register-username')?.value.trim() || '',
+        email: document.getElementById('register-email')?.value.trim() || '',
+        password: document.getElementById('register-password')?.value || '',
+        verification_code: document.getElementById('register-code')?.value.trim() || ''
+    };
+    try {
+        const response = await fetch(`${signalURL}/auth/register`, {
+            method: 'POST',
+            headers: buildJSONHeaders(false),
+            body: JSON.stringify(payload)
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(text || `注册失败: ${response.status}`);
+        }
+        showStatus('register-status', '注册成功，请使用用户名和密码登录', 'success');
+    } catch (err) {
+        log(`注册失败: ${err.message}`, 'error');
+        showStatus('register-status', `注册失败: ${err.message}`, 'error');
+    }
+}
+
+async function loginUser() {
+    state.signalURL = getSignalURL();
+    const payload = {
+        tenant_code: DEFAULT_TENANT_CODE,
+        username: document.getElementById('login-username')?.value.trim() || '',
+        password: document.getElementById('login-password')?.value || ''
+    };
+    try {
+        const response = await fetch(`${state.signalURL}/auth/login`, {
+            method: 'POST',
+            headers: buildJSONHeaders(false),
+            body: JSON.stringify(payload)
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(text || `登录失败: ${response.status}`);
+        }
+        const data = JSON.parse(text);
+        state.userSessionToken = data.token;
+        state.currentUser = data;
+        updateCurrentUserUI();
+        document.getElementById('config-card')?.classList.add('hidden');
+        document.getElementById('account-card')?.classList.add('hidden');
+        document.getElementById('agent-register-card')?.classList.remove('hidden');
+        showStatus('login-status', '登录成功', 'success');
+        log(`用户已登录: ${data.username}`);
+        await listAgents();
+    } catch (err) {
+        log(`登录失败: ${err.message}`, 'error');
+        showStatus('login-status', `登录失败: ${err.message}`, 'error');
+    }
+}
+
 // ==================== Agent列表 ====================
 async function listAgents() {
-    const signalURL = document.getElementById('signal-url')?.value.trim();
-    const signalToken = document.getElementById('signal-token')?.value.trim();
-    
-    if (!signalURL) {
+    state.signalURL = getSignalURL();
+    if (!state.signalURL) {
         alert('请输入信令服务器URL');
+        return;
+    }
+    if (!state.userSessionToken) {
+        alert('请先登录');
         return;
     }
 
     try {
         log('获取Agent列表...');
-        const headers = signalToken ? { 'Authorization': `Bearer ${signalToken}` } : {};
-        const response = await fetch(`${signalURL}/controller/list`, { headers });
+        const response = await fetch(`${state.signalURL}/controller/list`, { headers: buildJSONHeaders(true) });
         
         if (!response.ok) throw new Error(`获取失败: ${response.status}`);
         
@@ -98,7 +221,7 @@ function renderAgentList(agents) {
     list.innerHTML = '';
     
     if (agents.length === 0) {
-        list.innerHTML = '<li class="text-center">暂无在线Agent</li>';
+        list.innerHTML = '<li class="text-center">当前账户下暂无已连接过的 Agent</li>';
         return;
     }
     
@@ -106,53 +229,65 @@ function renderAgentList(agents) {
         const li = document.createElement('li');
         li.className = 'agent-item';
         const onlineClass = agent.online ? 'online' : 'offline';
-        const statusText = agent.online ? '🟢 在线' : '⚫ 离线';
+        const statusText = `${agent.online ? '🟢 在线' : '⚫ 离线'}${agent.description ? ` · ${escapeHtml(agent.description)}` : ''}`;
+        const agentName = escapeHtml(agent.display_name || agent.id);
         
         li.innerHTML = `
             <div class="agent-info">
+                <div class="agent-name">${agentName}</div>
                 <div class="agent-id">${escapeHtml(agent.id)}</div>
                 <div class="agent-status ${onlineClass}">${statusText}</div>
             </div>
-            <button class="btn btn-primary" onclick="selectAgent('${escapeHtml(agent.id)}')">选择</button>
+            <button class="btn btn-primary" onclick="selectAgent('${escapeHtml(agent.id)}', '${agentName}')">连接</button>
         `;
         list.appendChild(li);
     });
 }
 
-function selectAgent(id) {
-    const agentIdInput = document.getElementById('agent-id');
-    if (agentIdInput) agentIdInput.value = id;
+function selectAgent(id, displayName) {
+    state.agentID = id;
+    state.selectedAgentName = displayName || id;
+    const modalText = document.getElementById('connect-modal-agent');
+    const passwordInput = document.getElementById('agent-password');
+    const status = document.getElementById('password-status');
+    if (modalText) {
+        modalText.textContent = `${state.selectedAgentName} (${id})`;
+    }
+    if (passwordInput) {
+        passwordInput.value = '';
+        setTimeout(() => passwordInput.focus(), 0);
+    }
+    if (status) {
+        status.className = 'hidden';
+        status.textContent = '';
+    }
     log(`已选择Agent: ${id}`);
-    document.getElementById('password-card')?.classList.remove('hidden');
-    document.getElementById('config-card')?.classList.add('hidden');
+    document.getElementById('connect-modal')?.classList.remove('hidden');
+}
+
+function closeConnectModal() {
+    document.getElementById('connect-modal')?.classList.add('hidden');
 }
 
 // ==================== WebRTC连接 ====================
 async function connect() {
     resetConnectionState();
 
-    state.signalURL = document.getElementById('signal-url')?.value.trim() || '';
-    state.signalToken = document.getElementById('signal-token')?.value.trim() || '';
-    state.agentID = document.getElementById('agent-id')?.value.trim() || '';
+    state.signalURL = getSignalURL();
     const passwordInput = document.getElementById('agent-password');
     state.agentPassword = passwordInput ? passwordInput.value.replace(/^\s+|\s+$/g, '') : '';
     
-    if (!state.signalURL || !state.agentID || !state.agentPassword) {
+    if (!state.signalURL || !state.userSessionToken || !state.agentID || !state.agentPassword) {
         alert('请填写所有必填项');
         return;
     }
     
     try {
         log('连接到信令服务器...');
-        
-        const headers = state.signalToken ? { 
-            'Authorization': `Bearer ${state.signalToken}`, 
-            'Content-Type': 'application/json' 
-        } : { 'Content-Type': 'application/json' };
-        
+
         const connectRes = await fetch(`${state.signalURL}/controller/connect`, {
             method: 'POST',
-            headers,
+            headers: buildJSONHeaders(true),
             body: JSON.stringify({ agent_id: state.agentID })
         });
         
@@ -169,10 +304,7 @@ async function connect() {
         
         await fetch(`${state.signalURL}/controller/send?agent_id=${state.agentID}`, {
             method: 'POST',
-            headers: state.signalToken ? { 
-                'Authorization': `Bearer ${state.signalToken}`, 
-                'Content-Type': 'application/json' 
-            } : { 'Content-Type': 'application/json' },
+            headers: buildJSONHeaders(true),
             body: JSON.stringify({ type: 'offer', sdp: state.pc.localDescription })
         });
         
@@ -199,10 +331,7 @@ async function createPeerConnection() {
         if (event.candidate) {
             fetch(`${state.signalURL}/controller/send?agent_id=${state.agentID}`, {
                 method: 'POST',
-                headers: state.signalToken ? { 
-                    'Authorization': `Bearer ${state.signalToken}`, 
-                    'Content-Type': 'application/json' 
-                } : { 'Content-Type': 'application/json' },
+                headers: buildJSONHeaders(true),
                 body: JSON.stringify({ type: 'candidate', candidate: event.candidate })
             }).catch(err => log(`发送ICE候选失败: ${err.message}`, 'error'));
         }
@@ -265,8 +394,7 @@ async function startSignalingPoll() {
         if (!state.pc || state.pc.connectionState === 'closed') return;
         
         try {
-            const headers = state.signalToken ? { 'Authorization': `Bearer ${state.signalToken}` } : {};
-            const response = await fetch(`${state.signalURL}/controller/poll?agent_id=${state.agentID}`, { headers });
+            const response = await fetch(`${state.signalURL}/controller/poll?agent_id=${state.agentID}`, { headers: buildJSONHeaders(true) });
             
             if (response.status === 200) {
                 const msg = await response.json();
@@ -350,28 +478,28 @@ async function handleDataChannelMessage(data) {
                 
                 document.getElementById('config-card')?.classList.add('hidden');
                 document.getElementById('agents-card')?.classList.add('hidden');
-                document.getElementById('password-card')?.classList.add('hidden');
+                closeConnectModal();
                 document.getElementById('http-console-card')?.classList.remove('hidden');
             } else {
                 log('鉴权失败: 响应不匹配', 'error');
                 showStatus('password-status', '鉴权失败: 密码错误', 'error');
             }
-        } else if (msg.type === 13) {
+        } else if (msg.type === 14) {
             log(`收到Agent配置消息`);
             state.agentConfig = msg.payload;
             if (msg.payload && msg.payload.ports) {
                 log(`Agent有 ${msg.payload.ports.length} 个端口配置`);
                 renderPortButtons(msg.payload.ports);
             }
-        } else if (msg.type === 17) { // MsgTypeHTTPResponse
+        } else if (msg.type === 18) { // MsgTypeHTTPResponse
             handleHTTPResponse(msg.payload);
-        } else if (msg.type === 19) { // MsgTypeWSOpenAck
+        } else if (msg.type === 20) { // MsgTypeWSOpenAck
             handleWSOpenAck(msg.payload);
-        } else if (msg.type === 20) { // MsgTypeWSData
+        } else if (msg.type === 21) { // MsgTypeWSData
             handleWSData(msg.payload);
-        } else if (msg.type === 21) { // MsgTypeWSClose
+        } else if (msg.type === 22) { // MsgTypeWSClose
             handleWSClose(msg.payload);
-        } else if (msg.type === 22) { // MsgTypeWSError
+        } else if (msg.type === 23) { // MsgTypeWSError
             handleWSError(msg.payload);
         }
     } catch (err) {
@@ -430,9 +558,13 @@ function renderPortButtons(ports) {
         btn.onclick = () => {
             const pathInput = document.getElementById('http-path');
             const selector = document.getElementById('http-port');
+            const previewSelector = document.getElementById('preview-modal-service');
             state.selectedHTTPPort = port.id;
             if (selector) {
                 selector.value = port.id;
+            }
+            if (previewSelector) {
+                previewSelector.value = port.id;
             }
             if (pathInput && !pathInput.value.trim()) {
                 pathInput.value = '/';
@@ -464,7 +596,7 @@ async function fetchDc(portID, path, options = {}) {
     });
 
     sendProtocolMessage({
-        type: 16,
+        type: 17,
         payload: {
             id: requestId,
             port_id: portID,
@@ -540,8 +672,127 @@ function resetConnectionState() {
     state.derivedKey = null;
     state.selectedHTTPPort = null;
     state.currentPreview = null;
+    state.previewHistory = [];
+    state.previewHistoryIndex = -1;
     state.pendingHTTPRequests.clear();
     authStarted = false;
+    closePreviewModal();
+}
+
+function updatePreviewNavUI() {
+    const backBtn = document.getElementById('preview-back-btn');
+    const forwardBtn = document.getElementById('preview-forward-btn');
+    if (backBtn) backBtn.disabled = state.previewHistoryIndex <= 0;
+    if (forwardBtn) forwardBtn.disabled = state.previewHistoryIndex < 0 || state.previewHistoryIndex >= state.previewHistory.length - 1;
+}
+
+function populatePreviewServiceSelector(selectedPortID) {
+    const selector = document.getElementById('preview-modal-service');
+    if (!selector) return;
+    const mainSelector = document.getElementById('http-port');
+    selector.innerHTML = '';
+    if (mainSelector && mainSelector.options.length > 0) {
+        Array.from(mainSelector.options).forEach((option) => {
+            if (!option.value) return;
+            const cloned = document.createElement('option');
+            cloned.value = option.value;
+            cloned.textContent = option.textContent;
+            selector.appendChild(cloned);
+        });
+    }
+    selector.value = selectedPortID || state.currentPreview?.portID || state.selectedHTTPPort || '';
+    selector.onchange = () => {
+        const pathInput = document.getElementById('preview-modal-path');
+        const nextPortID = selector.value;
+        const path = normalizeHTTPPath(pathInput?.value || state.currentPreview?.path || '/');
+        if (!nextPortID) return;
+        state.selectedHTTPPort = nextPortID;
+        navigatePreviewTo(nextPortID, path);
+    };
+}
+
+function recordPreviewHistory(meta) {
+    if (!meta || !meta.portID || !meta.path) return;
+    const normalized = { portID: meta.portID, path: normalizeHTTPPath(meta.path) };
+    const current = state.previewHistory[state.previewHistoryIndex];
+    if (current && current.portID === normalized.portID && current.path === normalized.path) {
+        updatePreviewNavUI();
+        return;
+    }
+    state.previewHistory = state.previewHistory.slice(0, state.previewHistoryIndex + 1);
+    state.previewHistory.push(normalized);
+    state.previewHistoryIndex = state.previewHistory.length - 1;
+    updatePreviewNavUI();
+}
+
+function openPreviewModal(content, requestMeta = null) {
+    const modal = document.getElementById('preview-modal');
+    const title = document.getElementById('preview-modal-title');
+    const frame = document.getElementById('preview-modal-frame');
+    const pathInput = document.getElementById('preview-modal-path');
+    if (!modal || !frame) return;
+    if (title) {
+        const port = requestMeta?.portID || state.currentPreview?.portID || '';
+        title.textContent = port ? `服务: ${port}` : 'HTML 预览';
+    }
+    if (pathInput) {
+        pathInput.value = requestMeta?.path || state.currentPreview?.path || '/';
+        pathInput.onkeydown = (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                navigatePreviewModal();
+            }
+        };
+    }
+    populatePreviewServiceSelector(requestMeta?.portID || state.currentPreview?.portID || state.selectedHTTPPort);
+    frame.srcdoc = content || '';
+    modal.classList.remove('hidden');
+    updatePreviewNavUI();
+}
+
+function closePreviewModal() {
+    const modal = document.getElementById('preview-modal');
+    const frame = document.getElementById('preview-modal-frame');
+    if (frame) frame.srcdoc = '';
+    if (modal) modal.classList.add('hidden');
+}
+
+async function navigatePreviewTo(portID, path) {
+    if (!portID) {
+        log('当前没有可用的预览上下文', 'warn');
+        return;
+    }
+    try {
+        const response = await fetchDc(portID, path, { method: 'GET' });
+        displayHTTPResponse(response, { portID, path });
+    } catch (err) {
+        log(`预览跳转失败: ${err.message}`, 'error');
+    }
+}
+
+async function navigatePreviewModal() {
+    const pathInput = document.getElementById('preview-modal-path');
+    const serviceSelector = document.getElementById('preview-modal-service');
+    const portID = serviceSelector?.value || state.currentPreview?.portID;
+    const path = normalizeHTTPPath(pathInput?.value || '/');
+    navigatePreviewTo(portID, path);
+}
+
+async function navigatePreviewHistory(delta) {
+    const nextIndex = state.previewHistoryIndex + delta;
+    if (nextIndex < 0 || nextIndex >= state.previewHistory.length) {
+        return;
+    }
+    const target = state.previewHistory[nextIndex];
+    if (!target) return;
+    state.previewHistoryIndex = nextIndex;
+    updatePreviewNavUI();
+    try {
+        const response = await fetchDc(target.portID, target.path, { method: 'GET' });
+        displayHTTPResponse(response, { portID: target.portID, path: target.path }, false);
+    } catch (err) {
+        log(`历史跳转失败: ${err.message}`, 'error');
+    }
 }
 
 function generateRequestId() {
@@ -632,13 +883,17 @@ function handleWSError(payload) {
     ws.__emitError(payload.error || 'WebSocket error');
 }
 
-async function displayHTTPResponse(response, requestMeta = null) {
+async function displayHTTPResponse(response, requestMeta = null, pushHistory = true) {
     const statusEl = document.getElementById('http-response-status');
     const headersEl = document.getElementById('http-response-headers');
     const bodyEl = document.getElementById('http-response-body');
-    const previewEl = document.getElementById('http-response-preview');
     if (requestMeta && requestMeta.portID && requestMeta.path) {
         state.currentPreview = requestMeta;
+        if (pushHistory) {
+            recordPreviewHistory(requestMeta);
+        } else {
+            updatePreviewNavUI();
+        }
     }
     
     if (statusEl) {
@@ -667,15 +922,16 @@ async function displayHTTPResponse(response, requestMeta = null) {
     }
     
     // 尝试在 iframe 中预览 HTML
-    if (previewEl && response.body && response.status_code === 200) {
+    if (response.body && response.status_code === 200) {
         const bodyStr = base64ToUtf8(response.body);
         if (bodyStr.includes('<!DOCTYPE') || bodyStr.includes('<html')) {
-            previewEl.srcdoc = await preparePreviewHTML(bodyStr, state.currentPreview);
-            previewEl.classList.remove('hidden');
+            const prepared = await preparePreviewHTML(bodyStr, state.currentPreview);
+            openPreviewModal(prepared, state.currentPreview);
         } else {
-            previewEl.srcdoc = '';
-            previewEl.classList.add('hidden');
+            closePreviewModal();
         }
+    } else {
+        closePreviewModal();
     }
     
     log(`收到响应: ${response.status_code || 'Error'}`);
@@ -897,8 +1153,18 @@ async function inlineScriptSources(doc, meta) {
         const resourcePath = resolvePreviewPath(src, meta.path);
         try {
             const response = await fetchDcResource(meta.portID, resourcePath, { Accept: 'application/javascript,text/javascript,*/*' });
+            const contentType = getHeaderIgnoreCase(response.headers, 'content-type') || '';
+            const scriptText = base64ToUtf8(response.body || '');
+            const loweredContentType = String(contentType).toLowerCase();
+            const looksLikeScript = loweredContentType.indexOf('javascript') >= 0
+                || loweredContentType.indexOf('ecmascript') >= 0
+                || loweredContentType.indexOf('text/plain') >= 0;
+            if ((contentType && !looksLikeScript) || /^\s*</.test(scriptText)) {
+                console.error('inline script got non-js response', resourcePath, contentType, scriptText.substring(0, 200));
+                return;
+            }
             const inlineScript = doc.createElement('script');
-            inlineScript.textContent = base64ToUtf8(response.body || '');
+            inlineScript.textContent = scriptText;
             script.replaceWith(inlineScript);
         } catch (err) {
             console.error('inline script failed', resourcePath, err);
@@ -1015,7 +1281,7 @@ class DcWebSocket {
             headers['Sec-WebSocket-Protocol'] = protocols.trim();
         }
         sendProtocolMessage({
-            type: 18,
+            type: 19,
             payload: {
                 socket_id: this.socketId,
                 port_id: portID,
@@ -1032,7 +1298,7 @@ class DcWebSocket {
         if (typeof data === 'string') {
             log(`[DC-WS] 发送文本消息 socket=${this.socketId}, size=${data.length}`);
             sendProtocolMessage({
-                type: 20,
+                type: 21,
                 payload: {
                     socket_id: this.socketId,
                     data: utf8ToBase64(data),
@@ -1054,7 +1320,7 @@ class DcWebSocket {
         if (bytes) {
             log(`[DC-WS] 发送二进制消息 socket=${this.socketId}, size=${bytes.byteLength}`);
             sendProtocolMessage({
-                type: 20,
+                type: 21,
                 payload: {
                     socket_id: this.socketId,
                     data: bytesToBase64(bytes),
@@ -1066,7 +1332,7 @@ class DcWebSocket {
         const text = String(data);
         log(`[DC-WS] 发送文本消息 socket=${this.socketId}, size=${text.length}`);
         sendProtocolMessage({
-            type: 20,
+            type: 21,
             payload: {
                 socket_id: this.socketId,
                 data: utf8ToBase64(text),
@@ -1080,7 +1346,7 @@ class DcWebSocket {
         this.readyState = DcWebSocket.CLOSING;
         log(`[DC-WS] 主动关闭 socket=${this.socketId}, code=${code}, reason=${reason}`);
         sendProtocolMessage({
-            type: 21,
+            type: 22,
             payload: {
                 socket_id: this.socketId,
                 code,
@@ -1161,6 +1427,21 @@ function injectProxySupport(html, meta) {
 (function() {
   var portID = '${escapeJsString(meta.portID)}';
   var currentPath = '${escapeJsString(meta.path)}';
+  var rawFetch = window.fetch;
+  var RawXMLHttpRequest = window.XMLHttpRequest;
+  var rawOpen = window.open ? window.open.bind(window) : null;
+  function shouldTraceResource(value) {
+    var raw = String(value || '');
+    return /logo\\.png(?:[?#].*)?$/i.test(raw) || /controller\\.js(?:[?#].*)?$/i.test(raw) || /layui(?:\\.all)?\\.js(?:[?#].*)?$/i.test(raw);
+  }
+  function traceResource(stage, value, extra) {
+    if (!shouldTraceResource(value)) return;
+    try {
+      console.warn('[dc-trace]', stage, value, extra || '', new Error().stack);
+    } catch (e) {
+      console.warn('[dc-trace]', stage, value, extra || '');
+    }
+  }
   function normalizePath(value) {
     try {
       var url = new URL(value, 'https://dc.local' + (currentPath.startsWith('/') ? currentPath : '/' + currentPath));
@@ -1169,13 +1450,116 @@ function injectProxySupport(html, meta) {
       return value;
     }
   }
+  function isProxyTarget(value) {
+    return !!value && !/^https?:\\/\\//i.test(value) && !String(value).startsWith('//') &&
+      !String(value).startsWith('data:') && !String(value).startsWith('blob:') &&
+      !String(value).startsWith('javascript:') && !String(value).startsWith('mailto:') &&
+      !String(value).startsWith('#');
+  }
+  function navigateViaProxy(value, options) {
+    if (!isProxyTarget(value)) return false;
+    traceResource('navigate', value, options && options.method ? options.method : 'GET');
+    window.parent.__dcProxyNavigate(portID, normalizePath(value), options || {});
+    return true;
+  }
+  async function inlineMediaNode(node, attr) {
+    if (!node || !node.getAttribute) return;
+    var raw = node.getAttribute(attr);
+    if (!isProxyTarget(raw) || node.getAttribute('data-dc-inline') === '1') return;
+    traceResource('inline-media', raw, attr);
+    node.setAttribute('data-dc-inline', '1');
+    try {
+      var response = await window.parent.__dcProxyFetchRaw(portID, normalizePath(raw), { method: 'GET' });
+      var headers = response.headers || {};
+      var contentType = headers['content-type'] || headers['Content-Type'] || 'application/octet-stream';
+      node.setAttribute(attr, 'data:' + contentType + ';base64,' + (response.body || ''));
+    } catch (e) {
+      console.error('dc inline media failed', raw, e);
+      node.removeAttribute('data-dc-inline');
+    }
+  }
+  async function inlineStylesheetNode(node) {
+    if (!node || !node.getAttribute || node.getAttribute('data-dc-inline') === '1') return;
+    var href = node.getAttribute('href');
+    if (!isProxyTarget(href)) return;
+    traceResource('inline-stylesheet', href);
+    node.setAttribute('data-dc-inline', '1');
+    try {
+      var response = await window.parent.__dcProxyFetch(portID, normalizePath(href), { method: 'GET', headers: { Accept: 'text/css,*/*' } });
+      var style = document.createElement('style');
+      style.textContent = response.bodyText || '';
+      node.parentNode && node.parentNode.replaceChild(style, node);
+    } catch (e) {
+      console.error('dc inline stylesheet failed', href, e);
+      node.removeAttribute('data-dc-inline');
+    }
+  }
+  async function inlineScriptNode(node) {
+    if (!node || !node.getAttribute || node.getAttribute('data-dc-inline') === '1') return;
+    var src = node.getAttribute('src');
+    if (!isProxyTarget(src)) return;
+    traceResource('inline-script', src);
+    node.setAttribute('data-dc-inline', '1');
+    try {
+      var response = await window.parent.__dcProxyFetch(portID, normalizePath(src), { method: 'GET', headers: { Accept: 'application/javascript,text/javascript,*/*' } });
+      var headers = response.headers || {};
+      var contentType = headers['content-type'] || headers['Content-Type'] || '';
+      var loweredContentType = String(contentType || '').toLowerCase();
+      var looksLikeScript = loweredContentType.indexOf('javascript') >= 0 ||
+        loweredContentType.indexOf('ecmascript') >= 0 ||
+        loweredContentType.indexOf('text/plain') >= 0;
+      if ((contentType && !looksLikeScript) || /^\\s*</.test(response.bodyText || '')) {
+        console.error('dc inline script got non-js response', src, contentType, (response.bodyText || '').substring(0, 200));
+        node.removeAttribute('data-dc-inline');
+        return;
+      }
+      var script = document.createElement('script');
+      script.textContent = response.bodyText || '';
+      node.parentNode && node.parentNode.replaceChild(script, node);
+    } catch (e) {
+      console.error('dc inline script failed', src, e);
+      node.removeAttribute('data-dc-inline');
+    }
+  }
+  function processProxyNode(node) {
+    if (!node || node.nodeType !== 1) return;
+    var tag = (node.tagName || '').toLowerCase();
+    if (tag === 'img' || tag === 'source') {
+      inlineMediaNode(node, 'src');
+    } else if (tag === 'video') {
+      inlineMediaNode(node, 'poster');
+    } else if (tag === 'link' && (node.getAttribute('rel') || '').toLowerCase() === 'stylesheet') {
+      inlineStylesheetNode(node);
+    } else if (tag === 'script' && node.getAttribute('src')) {
+      inlineScriptNode(node);
+    }
+    if (node.querySelectorAll) {
+      Array.prototype.forEach.call(node.querySelectorAll('img[src],source[src],video[poster]'), function(el) {
+        processProxyNode(el);
+      });
+      Array.prototype.forEach.call(node.querySelectorAll('link[rel="stylesheet"][href],script[src]'), function(el) {
+        processProxyNode(el);
+      });
+    }
+  }
+  function patchLocationMethod(name) {
+    try {
+      var original = window.location[name];
+      if (typeof original !== 'function') return;
+      window.location[name] = function(value) {
+        if (!navigateViaProxy(value)) {
+          return original.call(window.location, value);
+        }
+      };
+    } catch (e) {}
+  }
   document.addEventListener('click', function(event) {
     var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
     if (!link) return;
     var href = link.getAttribute('href');
     if (!href || href.startsWith('javascript:') || href.startsWith('#') || link.target === '_blank') return;
     event.preventDefault();
-    window.parent.__dcProxyNavigate(portID, normalizePath(href));
+    navigateViaProxy(href);
   }, true);
   document.addEventListener('submit', function(event) {
     var form = event.target;
@@ -1196,8 +1580,6 @@ function injectProxySupport(html, meta) {
       body: body
     });
   }, true);
-  var rawFetch = window.fetch;
-  var RawXMLHttpRequest = window.XMLHttpRequest;
   function DcXMLHttpRequest() {
     this._method = 'GET';
     this._url = '';
@@ -1265,11 +1647,11 @@ function injectProxySupport(html, meta) {
       raw.send(body);
       return;
     }
-    window.parent.__dcProxyFetch(portID, normalizePath(targetUrl), {
-      method: self._method,
-      headers: self._headers,
-      body: body || ''
-    }).then(function(proxyResp) {
+      window.parent.__dcProxyFetch(portID, normalizePath(targetUrl), {
+        method: self._method,
+        headers: self._headers,
+        body: body || ''
+      }).then(function(proxyResp) {
       self.status = proxyResp.status_code || 200;
       self.statusText = String(self.status);
       self.responseText = proxyResp.bodyText || '';
@@ -1292,6 +1674,16 @@ function injectProxySupport(html, meta) {
   window.WebSocket.OPEN = 1;
   window.WebSocket.CLOSING = 2;
   window.WebSocket.CLOSED = 3;
+  if (rawOpen) {
+    window.open = function(url, target, features) {
+      if (navigateViaProxy(url)) {
+        return window;
+      }
+      return rawOpen(url, target, features);
+    };
+  }
+  patchLocationMethod('assign');
+  patchLocationMethod('replace');
   Object.defineProperty(document, 'cookie', {
     configurable: true,
     get: function() {
@@ -1305,6 +1697,7 @@ function injectProxySupport(html, meta) {
   window.fetch = function(input, init) {
     var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
     var method = init && init.method ? init.method : (input && input.method ? input.method : 'GET');
+    traceResource('fetch', url, method);
     var headers = {};
     if (init && init.headers) {
       if (init.headers.forEach) {
@@ -1327,6 +1720,25 @@ function injectProxySupport(html, meta) {
       });
     });
   };
+  Array.prototype.forEach.call(document.querySelectorAll('img[src],source[src],video[poster],link[rel="stylesheet"][href],script[src]'), function(node) {
+    processProxyNode(node);
+  });
+  new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      if (mutation.type === 'attributes') {
+        processProxyNode(mutation.target);
+        return;
+      }
+      Array.prototype.forEach.call(mutation.addedNodes || [], function(node) {
+        processProxyNode(node);
+      });
+    });
+  }).observe(document.documentElement || document, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['src', 'href', 'poster']
+  });
 })();
 </script>`;
     if (/<head[^>]*>/i.test(html)) {
@@ -1343,6 +1755,10 @@ function injectProxySupport(html, meta) {
 
 window.__dcProxyFetch = async function(portID, path, options = {}) {
     return await fetchDcText(portID, normalizeHTTPPath(path), options);
+};
+
+window.__dcProxyFetchRaw = async function(portID, path, options = {}) {
+    return await fetchDc(portID, normalizeHTTPPath(path), options);
 };
 
 window.__dcProxyGetCookie = function(portID, path) {
@@ -1392,23 +1808,44 @@ function disconnect() {
     
     document.body.classList.remove('connected-mode');
     document.getElementById('http-console-card')?.classList.add('hidden');
-    document.getElementById('agents-card')?.classList.add('hidden');
-    document.getElementById('config-card')?.classList.remove('hidden');
-    document.getElementById('password-card')?.classList.add('hidden');
+    closeConnectModal();
+    if (state.userSessionToken) {
+        document.getElementById('agent-register-card')?.classList.remove('hidden');
+        document.getElementById('agents-card')?.classList.remove('hidden');
+    } else {
+        document.getElementById('agent-register-card')?.classList.add('hidden');
+        document.getElementById('agents-card')?.classList.add('hidden');
+        document.getElementById('config-card')?.classList.remove('hidden');
+        document.getElementById('account-card')?.classList.remove('hidden');
+    }
     
     log('已断开连接');
 }
 
 // ==================== 初始化 ====================
 window.onload = () => {
+    const signalInput = document.getElementById('signal-url');
+    if (signalInput && (!signalInput.value || signalInput.value === 'http://localhost:8443')) {
+        signalInput.value = window.location.origin;
+    }
     log('Web Controller已加载');
-    log('步骤: 1) 查看Agent列表 2) 选择Agent 3) 输入密码连接 4) 发送HTTP请求');
+    log('步骤: 1) 登录/注册 2) 登记并选择自己的Agent 3) 输入Agent本地密码连接 4) 发送HTTP请求');
     const selector = document.getElementById('http-port');
     if (selector) {
         selector.addEventListener('change', (event) => {
             state.selectedHTTPPort = event.target.value || null;
         });
     }
+    const passwordInput = document.getElementById('agent-password');
+    if (passwordInput) {
+        passwordInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                connect();
+            }
+        });
+    }
+    updatePreviewNavUI();
 };
 
 function clearLogs() {
@@ -1417,6 +1854,6 @@ function clearLogs() {
 }
 
 function backToList() {
-    document.getElementById('password-card')?.classList.add('hidden');
+    closeConnectModal();
     document.getElementById('agents-card')?.classList.remove('hidden');
 }

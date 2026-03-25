@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -233,6 +234,17 @@ func (m *Manager) handleLocalConn(ctx context.Context, mapEntry *Map, conn net.C
 	for {
 		n, err := conn.Read(buf)
 		if err != nil {
+			if err == io.EOF {
+				// 仅关闭远端写方向，保留读方向继续接收响应数据。
+				fmt.Printf("[Tunnel] Local write side closed on stream %d, notifying remote half-close\n", streamID)
+				halfClose := protocol.StreamHalfClose{StreamID: streamID}
+				msg, _ := protocol.NewMessage(protocol.MsgTypeHalfCloseStream, halfClose)
+				if sendErr := m.handler.SendMessage(msg); sendErr != nil {
+					fmt.Printf("[Tunnel] Failed to send half-close on stream %d: %v\n", streamID, sendErr)
+					m.closeStream(streamID)
+				}
+				return
+			}
 			fmt.Printf("[Tunnel] Read error on stream %d: %v\n", streamID, err)
 			break
 		}

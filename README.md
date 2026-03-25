@@ -1,6 +1,10 @@
 # WebRTC/ICE 端口访问工具
 
-一个基于WebRTC/ICE的P2P端口访问工具，Agent预配置端口，Web端鉴权后直接访问。
+一个基于WebRTC/ICE的P2P端口访问工具，支持租户、用户登录、Agent 自动归属，以及 Agent 本地密码鉴权。
+
+当前分成两类访问模型：
+- `Web`：浏览器访问，只做 HTTP/HTML/WS 适配与预览
+- `Client`：独立 CLI 客户端，只做 TCP 端口映射，不做 HTTP 适配
 
 ## 架构设计
 
@@ -32,31 +36,36 @@
 
 **工作流程：**
 1. **Agent** 启动时预配置端口列表（SSH、HTTP等）
-2. **Web** 端通过信令服务器查看在线Agent列表
-3. 选择Agent，输入密码进行鉴权
-4. 鉴权通过后，Web端显示Agent开放的端口列表
-5. 点击端口即可建立P2P连接并访问
+2. **用户** 在信令服务中注册/登录，固定归属于租户 `convnet`
+3. 登录后获取当前用户唯一 `user_hash`
+4. Agent 启动时带上 `owner_hash + display_name` 自动归属到当前用户
+5. Web 端只能看到当前账户曾经连接过的 Agent，在线/离线按当前状态显示
+6. 选择 Agent，输入本地密码进行鉴权
+7. 鉴权通过后，Web 端显示 Agent 开放的端口列表并访问
 
 **部署角色说明：**
 | 角色 | 部署位置 | 运行方式 | 功能 |
 |------|----------|----------|------|
 | **Signaling** | 有公网IP的服务器 | 常驻服务 | 信令服务 + Web UI |
-| **Agent** | 被访问的内网机器 | 常驻服务 | 预配置端口，等待Web端访问 |
+| **Agent** | 被访问的内网机器 | 常驻服务 | 预配置端口，等待 Web/CLI 访问 |
 
 ## 特性
 
+- **租户与用户体系**: Controller 按租户和账户登录，只能看自己的 Agent
+- **自动归属**: Agent 启动时携带 `owner_hash` 自动归属到账户
+- **邮箱验证**: 支持验证码发送，可配置是否强制邮箱验证
 - **Agent预配置**: Agent启动时配置允许访问的端口列表
 - **P2P直连**: Web浏览器直接与Agent建立WebRTC P2P连接
 - **NAT穿透**: 支持STUN/TURN服务器，可穿透大多数NAT
 - **加密鉴权**: 基于密码的挑战-响应鉴权机制
-- **纯Web访问**: 无需安装客户端，浏览器直接访问
+- **双访问方式**: 支持浏览器访问，也支持独立 CLI 客户端做本地端口映射
 - **端口级控制**: Agent可精确控制每个端口的访问权限
 
 ## 快速开始
 
 ### 1. 构建
 
-只需要编译**两个程序**：
+通常需要编译三个程序：
 
 ```bash
 # Windows
@@ -75,20 +84,28 @@ go build -o bin/signaling ./cmd/signaling
 
 # 构建Agent
 go build -o bin/agent ./cmd/agent
+
+# 构建独立客户端
+go build -o bin/client ./cmd/client
 ```
 
 ### 2. 启动信令服务器
 
 ```bash
-./bin/signaling -addr 0.0.0.0:8443 -token MySecretToken
+./bin/signaling \
+  -addr 0.0.0.0:8443 \
+  -token MySecretToken \
+  -data data/signaling.json \
+  -email-verify-enabled=true \
+  -email-verify-required=false
 ```
 
-访问 `http://localhost:8443/` 查看Web界面。
+访问 `http://localhost:8443/` 查看 Web 界面。首次使用先注册用户，再复制自己的 `user_hash` 给 agent。
 
 ### 3. 启动Agent（使用默认端口配置）
 
 ```bash
-./bin/agent -id myserver -password mysecret -signal http://signaling.example.com:8443 -signal-token MySecretToken
+./bin/agent -id myserver -name "My Server" -owner-hash <user_hash> -password mysecret -signal http://signaling.example.com:8443 -signal-token MySecretToken
 ```
 
 默认开放的端口：
@@ -134,16 +151,37 @@ go build -o bin/agent ./cmd/agent
 启动Agent：
 
 ```bash
-./bin/agent -id myserver -password mysecret -signal http://signaling.example.com:8443 -ports ports.json
+./bin/agent -id myserver -name "My Server" -owner-hash <user_hash> -password mysecret -signal http://signaling.example.com:8443 -signal-token MySecretToken -ports ports.json
 ```
 
 ### 5. Web端访问
 
 1. 打开浏览器访问 `http://signaling.example.com:8443/`
-2. 配置信令服务器URL，点击"查看在线Agent"
-3. 选择要访问的Agent
-4. 输入Agent密码进行鉴权
-5. 鉴权通过后，点击端口进行访问
+2. 注册并登录用户
+3. 从页面复制当前用户的 `user_hash`
+4. 启动 agent，并携带 `-owner-hash <user_hash> -name <昵称>`
+5. agent 第一次上线后，会自动出现在“我的 Agent”列表
+6. 输入 Agent 本地密码进行鉴权
+7. 鉴权通过后点击端口进行访问
+
+### 6. CLI 客户端映射本地端口
+
+如果希望像传统客户端一样把远端服务映射到本地端口，可使用独立 CLI 客户端：
+
+```bash
+./bin/client \
+  -signal http://signaling.example.com:8443 \
+  -username demo \
+  -user-password demo123 \
+  -agent myserver \
+  -agent-password mysecret \
+  -map 127.0.0.1:18080=http \
+  -map 127.0.0.1:18443=https
+```
+
+启动后本地访问：
+- `http://127.0.0.1:18080` -> Agent 的 `http`
+- `https://127.0.0.1:18443` -> Agent 的 `https`
 
 ## Agent端口配置
 
@@ -178,9 +216,10 @@ Agent通过JSON文件配置端口：
 
 ### 三层鉴权
 
-1. **信令层**: 可选的 `-token` 参数防止未授权访问信令服务
-2. **Agent注册**: Agent ID唯一，需要正确的密码才能注册/更新
-3. **Web访问**: 每次连接需要输入Agent密码进行鉴权
+1. **信令层**: 可选的 `-token` 参数用于限制 agent 向信令服务注册
+2. **账户层**: Controller/Client 必须先以租户用户登录，拿到 session 后才能查询 agent
+3. **归属层**: Agent 启动时必须携带有效的 `owner_hash`，服务器据此自动归属到账户
+4. **本地鉴权层**: 每次 WebRTC DataChannel 建立后，仍需输入 Agent 本地密码完成鉴权；本地密码变更无需通知服务器
 
 ### 端口访问控制
 
@@ -195,7 +234,8 @@ webrtc-portmap/
 ├── cmd/
 │   ├── signaling/          # 信令服务器（内含Web UI）
 │   │   └── web/static/     # 嵌入的Web前端
-│   └── agent/              # 受控端（预配置端口）
+│   ├── agent/              # 受控端（预配置端口）
+│   └── client/             # 独立CLI客户端（本地端口映射）
 ├── pkg/
 │   ├── auth/               # 加密鉴权
 │   ├── protocol/           # 通信协议
@@ -205,7 +245,8 @@ webrtc-portmap/
 │   └── ports.json          # 端口配置示例
 ├── bin/
 │   ├── signaling           # 信令服务器
-│   └── agent               # 受控端
+│   ├── agent               # 受控端
+│   └── client              # 独立CLI客户端
 ├── build.bat               # Windows构建脚本
 ├── build.sh                # Linux/macOS构建脚本
 └── README.md
@@ -218,17 +259,25 @@ webrtc-portmap/
 ./signaling -addr 0.0.0.0:8443 -token MySecretToken
 
 # 2. 在服务器A启动Agent（开放SSH和HTTP）
-./agent -id server-a -password secret123 \
+./agent -id server-a -name "Server A" -owner-hash <user_hash> -password secret123 \
     -signal http://signaling.example.com:8443 \
     -signal-token MySecretToken
 
 # 3. 在服务器B启动Agent（开放MySQL和Redis）
-./agent -id server-b -password secret456 \
+./agent -id server-b -name "Server B" -owner-hash <user_hash> -password secret456 \
     -signal http://signaling.example.com:8443 \
     -signal-token MySecretToken \
     -ports custom-ports.json
 
-# 4. 浏览器访问 http://signaling.example.com:8443/
+# 4. 使用独立客户端映射本地端口
+./client -signal http://signaling.example.com:8443 \
+    -username demo \
+    -user-password demo123 \
+    -agent server-a \
+    -agent-password secret123 \
+    -map 127.0.0.1:18080=http
+
+# 5. 浏览器访问 http://signaling.example.com:8443/
 #    - 查看在线Agent列表（server-a, server-b）
 #    - 选择 server-a，输入密码 secret123
 #    - 鉴权成功后显示：SSH(22), HTTP(80)
@@ -240,7 +289,7 @@ webrtc-portmap/
 1. **TCP转发**: 当前主要实现TCP端口访问
 2. **Web Console**: 完善HTTP请求的Web Console功能
 3. **流量统计**: 添加端口访问日志和统计
-4. **多用户**: 支持不同用户访问不同端口
+4. **多用户共享**: 当前按“当前账户登记的 agent”隔离，尚未做 agent 共享授权
 
 ## License
 
