@@ -217,9 +217,17 @@ type Pong struct {
 
 // AgentConfig Agent配置信息（Agent主动上报）
 type AgentConfig struct {
-	AgentID string      `json:"agent_id"`
-	Ports   []PortInfo  `json:"ports"`
-	Version string      `json:"version,omitempty"`
+	AgentID    string          `json:"agent_id"`
+	Ports      []PortInfo      `json:"ports"`
+	ICEServers []ICEServerInfo `json:"ice_servers,omitempty"`
+	Version    string          `json:"version,omitempty"`
+}
+
+// ICEServerInfo 可序列化的 ICE server 配置
+type ICEServerInfo struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
 }
 
 // PortInfo 端口信息

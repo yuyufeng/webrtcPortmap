@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -69,6 +70,36 @@ type Agent struct {
 	reconnectRunning bool
 }
 
+func convertICEServers(servers []webrtc.ICEServer) []protocol.ICEServerInfo {
+	result := make([]protocol.ICEServerInfo, 0, len(servers))
+	for _, server := range servers {
+		if len(server.URLs) == 0 {
+			continue
+		}
+		credential := ""
+		switch v := server.Credential.(type) {
+		case string:
+			credential = v
+		case fmt.Stringer:
+			credential = v.String()
+		case nil:
+			credential = ""
+		default:
+			credential = fmt.Sprint(v)
+		}
+		urls := make([]string, 0, len(server.URLs))
+		for _, rawURL := range server.URLs {
+			urls = append(urls, base64.StdEncoding.EncodeToString([]byte(rawURL)))
+		}
+		result = append(result, protocol.ICEServerInfo{
+			URLs:       urls,
+			Username:   base64.StdEncoding.EncodeToString([]byte(server.Username)),
+			Credential: base64.StdEncoding.EncodeToString([]byte(credential)),
+		})
+	}
+	return result
+}
+
 func main() {
 	var (
 		id          = flag.String("id", "", "Agent ID (required)")
@@ -81,6 +112,7 @@ func main() {
 		turn        = flag.String("turn", "", "TURN server URL (optional)")
 		turnUser    = flag.String("turn-user", "", "TURN username")
 		turnPass    = flag.String("turn-pass", "", "TURN password")
+		iceConfig   = flag.String("ice-config", "", "ICE servers config JSON file (optional, overrides -turn)")
 		portsFile   = flag.String("ports", "", "Ports config JSON file (optional)")
 	)
 	flag.Parse()
@@ -124,14 +156,17 @@ func main() {
 	}
 
 	// 初始化WebRTC配置
-	if *turn != "" {
-		agent.config = wr.ConfigWithTURN(*turn, *turnUser, *turnPass)
-	} else {
-		agent.config = wr.DefaultConfig()
+	var err error
+	agent.config, err = wr.NewConfig(*iceConfig, *turn, *turnUser, *turnPass)
+	if err != nil {
+		fmt.Printf("[Agent] Failed to load ICE config: %v\n", err)
+		os.Exit(1)
 	}
-	if *stun != "" {
+	// 如果命令行指定了额外的 STUN，添加到列表开头
+	if *stun != "" && *iceConfig == "" {
 		agent.config.ICEServers = append([]webrtc.ICEServer{{URLs: []string{*stun}}}, agent.config.ICEServers...)
 	}
+	agent.config.PrintICEServers()
 
 	// 初始化隧道管理器
 	agent.tunnelMgr = tunnel.NewManager(agent)
@@ -198,11 +233,12 @@ func (a *Agent) loadPortsConfig(filename string) error {
 
 // register 注册到信令服务器
 func (a *Agent) register() error {
-	reqBody := map[string]string{
+	reqBody := map[string]interface{}{
 		"id":           a.id,
 		"auth_token":   a.sigToken,
 		"owner_hash":   a.ownerHash,
 		"display_name": a.displayName,
+		"ice_servers":  convertICEServers(a.config.ICEServers),
 	}
 	data, _ := json.Marshal(reqBody)
 
@@ -434,6 +470,14 @@ func (a *Agent) handleOffer(offer *webrtc.SessionDescription) {
 		}
 	})
 
+	peer.SetOnConnectionState(func(s webrtc.PeerConnectionState) {
+		switch s {
+		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			fmt.Printf("[Agent] Peer state=%s, cleaning up session\n", s.String())
+			a.cleanup()
+		}
+	})
+
 	// 设置消息处理
 	peer.SetOnMessage(a.handleMessage)
 
@@ -609,9 +653,10 @@ func (a *Agent) handleAuthMessage(data []byte) {
 // sendAgentConfig 发送Agent配置（端口列表）
 func (a *Agent) sendAgentConfig() {
 	config := protocol.AgentConfig{
-		AgentID: a.id,
-		Ports:   a.ports,
-		Version: "1.0",
+		AgentID:    a.id,
+		Ports:      a.ports,
+		ICEServers: convertICEServers(a.config.ICEServers),
+		Version:    "1.0",
 	}
 	
 	msg, err := protocol.NewMessage(protocol.MsgTypeAgentConfig, config)

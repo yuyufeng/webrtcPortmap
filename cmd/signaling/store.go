@@ -430,3 +430,21 @@ func (ds *DataStore) ListUserAgents(ownerUserID string) []*AgentRegistration {
 	}
 	return list
 }
+
+func (ds *DataStore) DeleteUserAgent(ownerUserID, agentID string) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return fmt.Errorf("agent_id is required")
+	}
+	record := ds.data.Agents[agentID]
+	if record == nil {
+		return fmt.Errorf("agent not found")
+	}
+	if record.OwnerUserID != ownerUserID {
+		return fmt.Errorf("agent does not belong to current user")
+	}
+	delete(ds.data.Agents, agentID)
+	return ds.saveLocked()
+}

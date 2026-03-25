@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -35,11 +36,12 @@ type SignalMessage struct {
 }
 
 type AgentInfo struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-	Description string `json:"description"`
-	Online      bool   `json:"online"`
-	Connected   bool   `json:"connected"`
+	ID          string                   `json:"id"`
+	DisplayName string                   `json:"display_name"`
+	Description string                   `json:"description"`
+	ICEServers  []protocol.ICEServerInfo `json:"ice_servers"`
+	Online      bool                     `json:"online"`
+	Connected   bool                     `json:"connected"`
 }
 
 type connectBusyInfo struct {
@@ -127,6 +129,7 @@ type Client struct {
 	stopChan      chan struct{}
 	authenticated bool
 	agentConfig   *protocol.AgentConfig
+	selectedAgent *AgentInfo
 	maps          []localMapSpec
 	mapsApplied   bool
 	mapsMu        sync.Mutex
@@ -146,13 +149,17 @@ func main() {
 		turn          = flag.String("turn", "", "TURN server URL (optional)")
 		turnUser      = flag.String("turn-user", "", "TURN username")
 		turnPass      = flag.String("turn-pass", "", "TURN password")
+		iceConfig     = flag.String("ice-config", "", "ICE servers config JSON file (optional, overrides -turn)")
 	)
 	var mappings mapFlags
 	flag.Var(&mappings, "map", "Local port mapping in the form <local_addr>=<port_id>, e.g. 127.0.0.1:18080=http")
 	flag.Parse()
 
 	if *username == "" || *userPassword == "" {
-		fmt.Println("Usage: client -username <user> -user-password <pass> [-list] | [-agent <agent_id> -agent-password <password> -map 127.0.0.1:18080=http]")
+		fmt.Println("Usage:")
+		fmt.Println("  client -signal <url> -username <user> -user-password <pass>")
+		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -list")
+		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -agent <agent_id> -agent-password <password> [-map 127.0.0.1:18080=http]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -167,14 +174,17 @@ func main() {
 		maps:          mappings,
 	}
 	client.tunnelMgr = tunnel.NewManager(client)
-	if *turn != "" {
-		client.config = wr.ConfigWithTURN(*turn, *turnUser, *turnPass)
-	} else {
-		client.config = wr.DefaultConfig()
+	var err error
+	client.config, err = wr.NewConfig(*iceConfig, *turn, *turnUser, *turnPass)
+	if err != nil {
+		fmt.Printf("[Client] Failed to load ICE config: %v\n", err)
+		os.Exit(1)
 	}
-	if *stun != "" {
+	// 如果命令行指定了额外的 STUN，添加到列表开头
+	if *stun != "" && *iceConfig == "" {
 		client.config.ICEServers = append([]webrtc.ICEServer{{URLs: []string{*stun}}}, client.config.ICEServers...)
 	}
+	client.config.PrintICEServers()
 
 	if err := client.login(); err != nil {
 		fmt.Printf("[Client] Login failed: %v\n", err)
@@ -194,6 +204,14 @@ func main() {
 		if err := client.promptSelectAgent(agents); err != nil {
 			fmt.Printf("[Client] Select agent failed: %v\n", err)
 			os.Exit(1)
+		}
+	}
+	if client.selectedAgent == nil {
+		for i := range agents {
+			if agents[i].ID == client.agentID {
+				client.selectedAgent = &agents[i]
+				break
+			}
 		}
 	}
 	if client.agentPassword == "" {
@@ -251,9 +269,49 @@ func (c *Client) promptSelectAgent(agents []AgentInfo) error {
 		}
 		selected := agents[index-1]
 		c.agentID = selected.ID
+		c.selectedAgent = &selected
 		fmt.Printf("[Client] 已选择 Agent: %s (%s)\n", selected.DisplayName, selected.ID)
 		return nil
 	}
+}
+
+func iceServerInfosToConfig(infos []protocol.ICEServerInfo) *wr.Config {
+	cfg := &wr.Config{ICEServers: make([]webrtc.ICEServer, 0, len(infos))}
+	for _, info := range infos {
+		if len(info.URLs) == 0 {
+			continue
+		}
+		urls := make([]string, 0, len(info.URLs))
+		for _, encoded := range info.URLs {
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				fmt.Printf("[Client] Skip invalid ICE URL encoding: %v\n", err)
+				continue
+			}
+			urls = append(urls, string(decoded))
+		}
+		if len(urls) == 0 {
+			continue
+		}
+		username := ""
+		if info.Username != "" {
+			if decoded, err := base64.StdEncoding.DecodeString(info.Username); err == nil {
+				username = string(decoded)
+			}
+		}
+		credential := ""
+		if info.Credential != "" {
+			if decoded, err := base64.StdEncoding.DecodeString(info.Credential); err == nil {
+				credential = string(decoded)
+			}
+		}
+		cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{
+			URLs:       urls,
+			Username:   username,
+			Credential: credential,
+		})
+	}
+	return cfg
 }
 
 func (c *Client) login() error {
@@ -316,7 +374,12 @@ func (c *Client) connect() error {
 	if err := c.connectSignalWS(); err != nil {
 		return err
 	}
-	peer, err := wr.NewPeer(c.config)
+	peerConfig := c.config
+	if c.selectedAgent != nil && len(c.selectedAgent.ICEServers) > 0 {
+		peerConfig = iceServerInfosToConfig(c.selectedAgent.ICEServers)
+		fmt.Printf("[Client] Using ICE servers provided by agent (%d)\n", len(peerConfig.ICEServers))
+	}
+	peer, err := wr.NewPeer(peerConfig)
 	if err != nil {
 		return err
 	}
@@ -736,6 +799,13 @@ func (c *Client) sendMessage(msg *protocol.Message) error {
 }
 
 func (c *Client) cleanup() {
+	if c.sessionToken != "" && c.agentID != "" {
+		body, _ := json.Marshal(map[string]string{"agent_id": c.agentID})
+		req, _ := http.NewRequest(http.MethodPost, c.signalURL+"/client/disconnect", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.sessionToken)
+		_, _ = c.httpClient.Do(req)
+	}
 	if c.tunnelMgr != nil {
 		for _, item := range c.tunnelMgr.GetMaps() {
 			_ = c.tunnelMgr.RemoveMap(item.ID)

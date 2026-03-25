@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
+	"webrtc-portmap/pkg/protocol"
 )
 
 //go:embed all:web/static
@@ -32,6 +33,7 @@ type AgentInfo struct {
 	DisplayName  string    `json:"display_name"`
 	TenantCode   string    `json:"tenant_code"`
 	OwnerUserID  string    `json:"owner_user_id"`
+	ICEServers   []protocol.ICEServerInfo `json:"ice_servers,omitempty"`
 	LastSeen     time.Time `json:"last_seen"`
 	Connected    bool      `json:"connected"`
 	ControllerSessionToken string `json:"-"`
@@ -99,13 +101,16 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/auth/login", s.withCORS(s.handleAuthLogin))
 	mux.HandleFunc("/auth/me", s.withCORS(s.handleAuthMe))
 	mux.HandleFunc("/controller/list", s.withCORS(s.handleControllerList))
+	mux.HandleFunc("/controller/agent/delete", s.withCORS(s.handleControllerAgentDelete))
 	mux.HandleFunc("/controller/agents/register", s.withCORS(s.handleControllerAgentRegister))
 	mux.HandleFunc("/controller/connect", s.withCORS(s.handleControllerConnect))
+	mux.HandleFunc("/controller/disconnect", s.withCORS(s.handleControllerDisconnect))
 	mux.HandleFunc("/controller/poll", s.withCORS(s.handleControllerPoll))
 	mux.HandleFunc("/controller/send", s.withCORS(s.handleControllerSend))
 	mux.HandleFunc("/controller/ws", s.handleControllerWS)
 	mux.HandleFunc("/client/list", s.withCORS(s.handleClientList))
 	mux.HandleFunc("/client/connect", s.withCORS(s.handleClientConnect))
+	mux.HandleFunc("/client/disconnect", s.withCORS(s.handleClientDisconnect))
 	mux.HandleFunc("/client/ws", s.handleClientWS)
 	mux.HandleFunc("/download/agent", s.withCORS(s.handleDownloadAgent))
 	mux.HandleFunc("/download/agent/windows", s.withCORS(s.handleDownloadAgentWindows))
@@ -489,6 +494,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		OwnerHash   string `json:"owner_hash"`
 		DisplayName string `json:"display_name"`
 		Description string `json:"description"`
+		ICEServers  []protocol.ICEServerInfo `json:"ice_servers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -533,6 +539,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  registration.DisplayName,
 		TenantCode:   registration.TenantCode,
 		OwnerUserID:  registration.OwnerUserID,
+		ICEServers:   req.ICEServers,
 		LastSeen:     time.Now(),
 		Connected:    false,
 		ControllerCh: make(chan *SignalMessage, 10),
@@ -640,6 +647,61 @@ func (s *Server) handleControllerList(w http.ResponseWriter, r *http.Request) {
 	s.handleOwnedAgentList(w, r)
 }
 
+func (s *Server) handleControllerAgentDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	session, user, err := s.requireUser(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := s.dataStore.DeleteUserAgent(user.ID, req.AgentID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var (
+		agent *AgentInfo
+		ok    bool
+	)
+	s.mu.Lock()
+	agent, ok = s.agents[req.AgentID]
+	if ok {
+		delete(s.tokens, agent.Token)
+		delete(s.agents, req.AgentID)
+	}
+	s.mu.Unlock()
+
+	if ok {
+		if agent.ControllerWSConn != nil {
+			_ = agent.ControllerWSConn.Close()
+		}
+		select {
+		case agent.ControllerCh <- &SignalMessage{Type: "disconnect"}:
+		default:
+		}
+		close(agent.ControllerCh)
+		close(agent.AgentCh)
+		fmt.Printf("[Signaling] Agent deleted by user %s: %s (session=%s)\n", user.Username, req.AgentID, session.Token)
+	} else {
+		fmt.Printf("[Signaling] Agent deleted by user %s: %s\n", user.Username, req.AgentID)
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"success":  true,
+		"agent_id": req.AgentID,
+	}, http.StatusOK)
+}
+
 func (s *Server) handleClientList(w http.ResponseWriter, r *http.Request) {
 	s.handleOwnedAgentList(w, r)
 }
@@ -661,6 +723,12 @@ func (s *Server) handleOwnedAgentList(w http.ResponseWriter, r *http.Request) {
 			"id":           record.AgentID,
 			"display_name": record.DisplayName,
 			"description":  record.Description,
+			"ice_servers":  func() []protocol.ICEServerInfo {
+				if agent == nil {
+					return nil
+				}
+				return agent.ICEServers
+			}(),
 			"online":       online,
 			"connected":    connected,
 		})
@@ -675,6 +743,14 @@ func (s *Server) handleControllerConnect(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleClientConnect(w http.ResponseWriter, r *http.Request) {
 	s.handleOwnedAgentConnect(w, r, "client")
+}
+
+func (s *Server) handleControllerDisconnect(w http.ResponseWriter, r *http.Request) {
+	s.handleOwnedAgentDisconnect(w, r, "web")
+}
+
+func (s *Server) handleClientDisconnect(w http.ResponseWriter, r *http.Request) {
+	s.handleOwnedAgentDisconnect(w, r, "client")
 }
 
 func (s *Server) handleOwnedAgentConnect(w http.ResponseWriter, r *http.Request, kind string) {
@@ -754,6 +830,53 @@ func (s *Server) handleOwnedAgentConnect(w http.ResponseWriter, r *http.Request,
 		"takeover": takeover,
 	}
 	writeJSON(w, resp, http.StatusOK)
+}
+
+func (s *Server) handleOwnedAgentDisconnect(w http.ResponseWriter, r *http.Request, kind string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	session, user, err := s.requireUser(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	registration := s.dataStore.GetAgent(req.AgentID)
+	if registration == nil || registration.OwnerUserID != user.ID {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+
+	var notify bool
+	s.mu.Lock()
+	agent, ok := s.agents[req.AgentID]
+	if ok && agent.ControllerSessionToken == session.Token && agent.ControllerKind == kind {
+		agent.Connected = false
+		agent.ControllerSessionToken = ""
+		agent.ControllerUserID = ""
+		agent.ControllerUsername = ""
+		agent.ControllerKind = ""
+		agent.ControllerWSConn = nil
+		notify = true
+	}
+	s.mu.Unlock()
+
+	if notify && ok {
+		select {
+		case agent.ControllerCh <- &SignalMessage{Type: "disconnect"}:
+		default:
+			fmt.Printf("[Signaling] Agent %s control channel busy, disconnect signal dropped\n", req.AgentID)
+		}
+	}
+	writeJSON(w, map[string]interface{}{"success": true, "agent_id": req.AgentID}, http.StatusOK)
 }
 
 func (s *Server) handleControllerPoll(w http.ResponseWriter, r *http.Request) {

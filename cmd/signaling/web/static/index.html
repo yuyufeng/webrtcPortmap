@@ -13,6 +13,14 @@
             color: #333;
         }
         .container { max-width: 3000px; margin: 0 auto; }
+        .topbar {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 12px;
+        }
+        .topbar.hidden {
+            display: none !important;
+        }
         h1 { text-align: center; color: #333; margin-bottom: 16px; }
         .subtitle { text-align: center; color: #666; margin-bottom: 20px; }
         .card {
@@ -54,21 +62,78 @@
         .status.error { background: #f8d7da; color: #721c24; }
         .status.info { background: #d1ecf1; color: #0c5460; }
         .agent-list, .ports-list { list-style: none; }
+        .agent-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 14px;
+        }
         .agent-item {
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 15px;
-            border: 1px solid #eee;
-            border-radius: 4px;
-            margin-bottom: 10px;
+            flex-direction: column;
+            gap: 12px;
+            padding: 16px;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            background: #fff;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+            min-height: 172px;
         }
-        .agent-item:hover { background: #f9f9f9; }
-        .agent-info { flex: 1; }
-        .agent-id { font-weight: bold; color: #333; font-size: 16px; }
-        .agent-name { font-weight: 600; color: #333; font-size: 16px; }
-        .agent-status { font-size: 12px; color: #666; margin-top: 4px; }
-        .agent-status.online { color: #4CAF50; }
+        .agent-item:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.1);
+        }
+        .agent-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .agent-id {
+            font-weight: 600;
+            color: #64748b;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        .agent-name {
+            font-weight: 700;
+            color: #1f2937;
+            font-size: 17px;
+            line-height: 1.4;
+        }
+        .agent-status {
+            display: inline-flex;
+            align-items: center;
+            width: fit-content;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: #f3f4f6;
+            color: #4b5563;
+        }
+        .agent-status.online {
+            background: #e8f7ee;
+            color: #1b7f47;
+        }
+        .agent-status.offline {
+            background: #f4f4f5;
+            color: #52525b;
+        }
+        .agent-description {
+            font-size: 13px;
+            color: #6b7280;
+            line-height: 1.5;
+            min-height: 38px;
+        }
+        .agent-item .btn {
+            width: 100%;
+        }
+        .agent-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .agent-actions .btn {
+            flex: 1 1 0;
+        }
         .flex { display: flex; gap: 10px; }
         .stack { display: flex; flex-direction: column; gap: 12px; }
         .hidden { display: none !important; }
@@ -154,6 +219,24 @@
             border: 1px solid #e5e5e5;
             border-radius: 8px;
             background: #fff;
+        }
+        .donate-card {
+            align-items: center;
+            text-align: center;
+        }
+        .donate-card img {
+            width: 150px;
+            max-width: 100%;
+            height: auto;
+            border-radius: 10px;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            padding: 8px;
+        }
+        .donate-card .donate-text {
+            font-size: 13px;
+            color: #5b6470;
+            line-height: 1.6;
         }
         .download-group-title {
             font-size: 13px;
@@ -482,12 +565,15 @@
 </head>
 <body>
     <div class="container">
+        <div class="topbar hidden" id="topbar">
+            <button class="btn btn-secondary" type="button" onclick="logoutUser()">退出登录</button>
+        </div>
         <h1>🌐 WebRTC PortMap - HTTP Web Console</h1>
         <p class="subtitle">通过 WebRTC P2P 连接访问 Agent 本地 HTTP 服务</p>
 
         <input type="hidden" id="signal-url" value="">
 
-        <div class="card intro-card">
+        <div class="card intro-card" id="intro-card">
             <h2>✨ 功能说明</h2>
             <div class="intro-grid">
                 服务在内网无法访问使用，并不需要公网访问，给自己准备一个随到随用的途径。比如将openclaw的控制端带到任何地方。
@@ -555,9 +641,9 @@
         </div>
 
         <div class="card hidden" id="agent-register-card">
-            <h2>🧾 步骤3: 登记agent</h2>
+            <h2 >🧾 步骤1: 登记agent</h2>
             <div class="current-user" id="current-user"></div>
-            <details class="details-card" style="margin-top: 0;">
+            <details class="details-card" id="agent-register-details" style="margin-top: 0;">
                 <summary>查看用户 Hash 和 Agent 启动命令</summary>
                 <div class="details-body">
                     <div class="form-group">
@@ -567,44 +653,54 @@
                     <div class="toolbar-note">将这个 hash 带给 agent。agent 首次上线时会自动挂到当前账户名下，以后在线显示在线，不在线显示离线。</div>
                     <div class="download-grid">
                         <div class="download-group">
-                            <div class="download-group-title">Agent 下载</div>
+                            <div class="download-group-title">Agent（登记你的内网服务，以便你随时访问）</div>
                             <div class="download-links">
                                 <a id="agent-download-url-windows" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Windows Agent">Win</a>
                                 <a id="agent-download-url-linux" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Linux Agent">🐧</a>
                                 <a id="agent-download-url-mac" class="download-link" href="#" target="_blank" rel="noopener" title="下载 macOS Agent">🍎</a>
                             </div>
+
+                             <div class="form-group">
+                                <label>Agent 启动示例 （默认开放了80和443的端口映射，用于快速验证,password为请求本地鉴权时所需要提供的<span style="color: rgb(165, 26, 33);">本地密码 一定要修改</span>：</label>
+                                <textarea id="agent-start-command" rows="4" readonly></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label>Agent 端口配置示例（ports.json），如果需要更多灵活的端口映射描述就需要使用配置文件：</label>
+                                <textarea id="agent-ports-json" rows="12" readonly></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label>Agent 启动示例（带配置文件）</label>
+                                <textarea id="agent-start-command-with-ports" rows="4" readonly></textarea>
+                            </div>
                         </div>
                         <div class="download-group">
-                            <div class="download-group-title">Client 下载</div>
+                            <div class="download-group-title">Client（你对访问有更高的访问需求，要将发布的Agent端口拉取到本地可以使用本工具）。</div>
                             <div class="download-links">
                                 <a id="client-download-url-windows" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Windows Client">Win</a>
                                 <a id="client-download-url-linux" class="download-link" href="#" target="_blank" rel="noopener" title="下载 Linux Client">🐧</a>
                                 <a id="client-download-url-mac" class="download-link" href="#" target="_blank" rel="noopener" title="下载 macOS Client">🍎</a>
                             </div>
+                            <div class="form-group">
+                                <label>Client 访问示例</label>
+                                <textarea id="client-start-command" rows="4" readonly></textarea>
+                                
+                            </div>
+                           
+                            <div class="download-group donate-card">
+                             <div class="donate-text">如果本软件能帮助到你我很开心，希望能够捐助作者一杯咖啡：）</div>
+                                        <div style="margin: auto;"><img src="/image.png" alt="捐助二维码"></div>
+                            </div>
+                    
                         </div>
                     </div>
-                    <div class="form-group">
-                        <label>Agent 启动示例</label>
-                        <textarea id="agent-start-command" rows="4" readonly></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Agent 端口配置示例（ports.json）</label>
-                        <textarea id="agent-ports-json" rows="12" readonly></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Agent 启动示例（带配置文件）</label>
-                        <textarea id="agent-start-command-with-ports" rows="4" readonly></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Client 访问示例</label>
-                        <textarea id="client-start-command" rows="4" readonly></textarea>
-                    </div>
+                    
+                    
                 </div>
             </details>
         </div>
 
         <div class="card hidden" id="agents-card">
-            <h2>📋 步骤4: 选择我的 Agent</h2>
+            <h2>📋 步骤2: 选择我的 Agent</h2>
             <div class="current-user" id="agent-list-user"></div>
             <ul class="agent-list" id="agent-list"></ul>
             <button class="btn btn-secondary mt-4" onclick="listAgents()">刷新列表</button>
@@ -641,7 +737,7 @@
                     <input type="text" id="http-path" placeholder="/api/test?name=demo" value="/">
                 </div>
                 <div class="toolbar-actions">
-                    <button class="btn btn-primary" onclick="sendHTTPRequest()">发送请求</button>
+                    <button class="btn btn-primary" onclick="sendHTTPRequest()">连接服务</button>
                     <button class="btn btn-danger" onclick="disconnect()">断开连接</button>
                 </div>
             </div>

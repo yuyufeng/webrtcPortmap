@@ -18,11 +18,14 @@ const state = {
     currentPreview: null,
     previewHistory: [],
     previewHistoryIndex: -1,
-    selectedAgentName: ''
+    selectedAgentName: '',
+    selectedAgent: null,
+    agentsById: {}
 };
 
 const DEFAULT_TENANT_CODE = 'convnet';
 const DEFAULT_TENANT_NAME = 'convnet';
+const SESSION_STORAGE_KEY = 'webrtc_portmap_session';
 
 // ==================== 日志工具 ====================
 function log(message, type = 'info') {
@@ -39,6 +42,21 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function decodeBase64Utf8(value) {
+    if (!value) return '';
+    try {
+        const binary = atob(value);
+        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+        return new TextDecoder().decode(bytes);
+    } catch (e) {
+        try {
+            return atob(value);
+        } catch (err) {
+            return '';
+        }
+    }
 }
 
 function showStatus(elementId, message, type) {
@@ -71,6 +89,38 @@ function buildJSONHeaders(includeAuth = true) {
         headers.Authorization = `Bearer ${state.userSessionToken}`;
     }
     return headers;
+}
+
+function saveSessionState() {
+    if (!state.userSessionToken || !state.currentUser) {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        return;
+    }
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+        signalURL: state.signalURL,
+        token: state.userSessionToken,
+        currentUser: state.currentUser
+    }));
+}
+
+function loadSessionState() {
+    try {
+        const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+    } catch (err) {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        return null;
+    }
+}
+
+function clearSessionState() {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+}
+
+function updateLoginVisibility() {
+    const loggedIn = !!(state.userSessionToken && state.currentUser);
+    document.getElementById('topbar')?.classList.toggle('hidden', !loggedIn);
 }
 
 function updateCurrentUserUI() {
@@ -144,8 +194,9 @@ function updateCurrentUserUI() {
         agentStartCommandWithPorts.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -ports ./ports.json`;
     }
     if (clientStartCommand) {
-        clientStartCommand.value = `client -signal ${signalURL} -username ${state.currentUser?.username || '<username>'} -user-password <password>`;
+        clientStartCommand.value = `client -signal ${signalURL} -username ${state.currentUser?.username || '<username>'} -user-password <password>\n# 默认进入交互模式：选择 Agent、输入本地密码、选择服务并指定本地端口`;
     }
+    updateLoginVisibility();
 }
 
 // ==================== Crypto ====================
@@ -244,6 +295,8 @@ async function loginUser() {
         state.userSessionToken = data.token;
         state.currentUser = data;
         updateCurrentUserUI();
+        saveSessionState();
+        document.getElementById('intro-card')?.classList.add('hidden');
         document.getElementById('account-card')?.classList.add('hidden');
         document.getElementById('agent-register-card')?.classList.remove('hidden');
         showStatus('login-status', '登录成功', 'success');
@@ -252,6 +305,43 @@ async function loginUser() {
     } catch (err) {
         log(`登录失败: ${err.message}`, 'error');
         showStatus('login-status', `登录失败: ${err.message}`, 'error');
+    }
+}
+
+async function restoreLoginSession() {
+    const saved = loadSessionState();
+    if (!saved?.token) {
+        updateLoginVisibility();
+        return false;
+    }
+    state.signalURL = (saved.signalURL || getSignalURL() || window.location.origin || '').replace(/\/+$/, '');
+    state.userSessionToken = saved.token;
+    try {
+        const response = await fetch(`${state.signalURL}/auth/me`, {
+            headers: buildJSONHeaders(true)
+        });
+        if (!response.ok) {
+            throw new Error(`restore failed: ${response.status}`);
+        }
+        const data = await response.json();
+        state.currentUser = {
+            ...saved.currentUser,
+            ...data,
+            token: state.userSessionToken
+        };
+        updateCurrentUserUI();
+        document.getElementById('intro-card')?.classList.add('hidden');
+        document.getElementById('account-card')?.classList.add('hidden');
+        document.getElementById('agent-register-card')?.classList.remove('hidden');
+        await listAgents();
+        log(`已恢复登录会话: ${state.currentUser.username}`);
+        return true;
+    } catch (err) {
+        clearSessionState();
+        state.userSessionToken = '';
+        state.currentUser = null;
+        updateLoginVisibility();
+        return false;
     }
 }
 
@@ -273,20 +363,27 @@ async function listAgents() {
         
         if (!response.ok) throw new Error(`获取失败: ${response.status}`);
         
-        const agents = await response.json();
+        const result = await response.json();
+        const agents = Array.isArray(result) ? result : [];
         renderAgentList(agents);
         document.getElementById('agents-card')?.classList.remove('hidden');
         log(`找到 ${agents.length} 个Agent`);
     } catch (err) {
+        const message = '获取 Agent 列表失败，请刷新页面后重试；如果问题持续存在，请重新登录。';
         log(`获取Agent列表失败: ${err.message}`, 'error');
-        alert(`获取Agent列表失败: ${err.message}`);
+        alert(message);
     }
 }
 
 function renderAgentList(agents) {
     const list = document.getElementById('agent-list');
+    const registerDetails = document.getElementById('agent-register-details');
     if (!list) return;
     list.innerHTML = '';
+    state.agentsById = {};
+    if (registerDetails) {
+        registerDetails.open = agents.length === 0;
+    }
     
     if (agents.length === 0) {
         list.innerHTML = '<li class="text-center">当前账户下暂无已连接过的 Agent</li>';
@@ -294,19 +391,27 @@ function renderAgentList(agents) {
     }
     
     agents.forEach(agent => {
+        state.agentsById[agent.id] = agent;
         const li = document.createElement('li');
         li.className = 'agent-item';
         const onlineClass = agent.online ? 'online' : 'offline';
-        const statusText = `${agent.online ? '🟢 在线' : '⚫ 离线'}${agent.description ? ` · ${escapeHtml(agent.description)}` : ''}`;
+        const statusText = agent.online ? '在线' : '离线';
         const agentName = escapeHtml(agent.display_name || agent.id);
+        const description = agent.description
+            ? `<div class="agent-description">${escapeHtml(agent.description)}</div>`
+            : '<div class="agent-description">已登记的共享 Agent，可用于 Web 访问或 Client 端口映射。</div>';
         
         li.innerHTML = `
             <div class="agent-info">
                 <div class="agent-name">${agentName}</div>
                 <div class="agent-id">${escapeHtml(agent.id)}</div>
+                ${description}
                 <div class="agent-status ${onlineClass}">${statusText}</div>
             </div>
-            <button class="btn btn-primary" onclick="selectAgent('${escapeHtml(agent.id)}', '${agentName}')">连接</button>
+            <div class="agent-actions">
+                <button class="btn btn-primary" onclick="selectAgent('${escapeHtml(agent.id)}', '${agentName}')">连接</button>
+                <button class="btn btn-danger" onclick="deleteAgent('${escapeHtml(agent.id)}', '${agentName}')">删除</button>
+            </div>
         `;
         list.appendChild(li);
     });
@@ -315,6 +420,7 @@ function renderAgentList(agents) {
 function selectAgent(id, displayName) {
     state.agentID = id;
     state.selectedAgentName = displayName || id;
+    state.selectedAgent = state.agentsById[id] || null;
     const modalText = document.getElementById('connect-modal-agent');
     const passwordInput = document.getElementById('agent-password');
     const status = document.getElementById('password-status');
@@ -335,6 +441,32 @@ function selectAgent(id, displayName) {
 
 function closeConnectModal() {
     document.getElementById('connect-modal')?.classList.add('hidden');
+}
+
+async function deleteAgent(id, displayName) {
+    const name = displayName || id;
+    if (!window.confirm(`确认删除 Agent "${name}" 吗？在线 Agent 会被立即断开。`)) {
+        return;
+    }
+    try {
+        const response = await fetch(`${state.signalURL}/controller/agent/delete`, {
+            method: 'POST',
+            headers: buildJSONHeaders(true),
+            body: JSON.stringify({ agent_id: id })
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(text || `删除失败: ${response.status}`);
+        }
+        log(`已删除 Agent: ${id}`);
+        if (state.agentID === id) {
+            disconnect();
+        }
+        await listAgents();
+    } catch (err) {
+        log(`删除 Agent 失败: ${err.message}`, 'error');
+        alert(`删除 Agent 失败: ${err.message}`);
+    }
 }
 
 // ==================== WebRTC连接 ====================
@@ -406,12 +538,24 @@ async function claimWebAgentControl(force) {
 }
 
 async function createPeerConnection() {
-    const config = {
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-    };
+    let iceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+    ];
+    if (state.selectedAgent && Array.isArray(state.selectedAgent.ice_servers) && state.selectedAgent.ice_servers.length > 0) {
+        iceServers = state.selectedAgent.ice_servers.map((server) => {
+            const urls = Array.isArray(server.urls)
+                ? server.urls.map((item) => decodeBase64Utf8(item)).filter(Boolean)
+                : [];
+            return {
+                urls,
+                username: server.username ? decodeBase64Utf8(server.username) || undefined : undefined,
+                credential: server.credential ? decodeBase64Utf8(server.credential) || undefined : undefined
+            };
+        }).filter((server) => Array.isArray(server.urls) && server.urls.length > 0);
+        log(`使用 Agent 提供的 ICE 配置 (${iceServers.length})`);
+    }
+    const config = { iceServers };
     
     state.pc = new RTCPeerConnection(config);
     
@@ -1887,6 +2031,13 @@ window.__dcCreateWebSocket = function(portID, url, protocols, currentPath) {
 
 // ==================== 断开连接 ====================
 function disconnect() {
+    if (state.userSessionToken && state.agentID) {
+        fetch(`${state.signalURL}/controller/disconnect`, {
+            method: 'POST',
+            headers: buildJSONHeaders(true),
+            body: JSON.stringify({ agent_id: state.agentID })
+        }).catch(() => {});
+    }
     for (const ws of state.wsConnections.values()) {
         try { ws.close(1000, 'disconnect'); } catch (e) {}
     }
@@ -1901,6 +2052,7 @@ function disconnect() {
         document.getElementById('agent-register-card')?.classList.remove('hidden');
         document.getElementById('agents-card')?.classList.remove('hidden');
     } else {
+        document.getElementById('intro-card')?.classList.remove('hidden');
         document.getElementById('agent-register-card')?.classList.add('hidden');
         document.getElementById('agents-card')?.classList.add('hidden');
         document.getElementById('account-card')?.classList.remove('hidden');
@@ -1910,8 +2062,17 @@ function disconnect() {
     log('已断开连接');
 }
 
+function logoutUser() {
+    state.userSessionToken = '';
+    state.currentUser = null;
+    clearSessionState();
+    disconnect();
+    updateCurrentUserUI();
+    showAuthPanel('login');
+}
+
 // ==================== 初始化 ====================
-window.onload = () => {
+window.onload = async () => {
     const signalInput = document.getElementById('signal-url');
     if (signalInput && (!signalInput.value || signalInput.value === 'http://localhost:8443')) {
         signalInput.value = window.location.origin;
@@ -1936,6 +2097,7 @@ window.onload = () => {
         });
     }
     updatePreviewNavUI();
+    await restoreLoginSession();
 };
 
 function clearLogs() {
@@ -1954,8 +2116,10 @@ window.registerUser = registerUser;
 window.loginUser = loginUser;
 window.listAgents = listAgents;
 window.selectAgent = selectAgent;
+window.deleteAgent = deleteAgent;
 window.closeConnectModal = closeConnectModal;
 window.connect = connect;
 window.disconnect = disconnect;
 window.clearLogs = clearLogs;
 window.backToList = backToList;
+window.logoutUser = logoutUser;

@@ -23,6 +23,7 @@ type Peer struct {
 	onDataChannelClose func()
 	onMessage          func([]byte)
 	onICECandidate     func(*webrtc.ICECandidate)
+	onConnectionState  func(webrtc.PeerConnectionState)
 	
 	// 状态
 	mu            sync.RWMutex
@@ -63,6 +64,34 @@ func NewPeer(config *Config) (*Peer, error) {
 		p.mu.Lock()
 		p.connected = s == webrtc.PeerConnectionStateConnected
 		p.mu.Unlock()
+		if p.onConnectionState != nil {
+			p.onConnectionState(s)
+		}
+
+		switch s {
+		case webrtc.PeerConnectionStateConnected:
+			// 获取连接使用的本地和远端候选地址信息
+			go p.logConnectionType()
+		case webrtc.PeerConnectionStateFailed:
+			fmt.Printf("[WebRTC] Connection failed! Possible reasons:\n")
+			fmt.Printf("  - P2P direct connection blocked by NAT/Firewall\n")
+			fmt.Printf("  - No TURN server configured or TURN credentials invalid\n")
+			fmt.Printf("  - ICE candidates could not be exchanged properly\n")
+			fmt.Printf("[WebRTC] To enable relay through TURN server, use:\n")
+			fmt.Printf("  -turn turn:your.turn.server:3478 -turn-user username -turn-pass password\n")
+		case webrtc.PeerConnectionStateDisconnected:
+			fmt.Printf("[WebRTC] Connection disconnected, may attempt to reconnect...\n")
+		}
+	})
+
+	// 设置ICE连接状态变化回调（更细粒度的ICE状态）
+	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		fmt.Printf("[WebRTC] ICE connection state: %s\n", s.String())
+	})
+
+	// 设置ICE候选收集状态回调
+	pc.OnICEGatheringStateChange(func(s webrtc.ICEGatheringState) {
+		fmt.Printf("[WebRTC] ICE gathering state: %s\n", s.String())
 	})
 
 	// 设置数据通道回调（作为answerer时）
@@ -72,6 +101,11 @@ func NewPeer(config *Config) (*Peer, error) {
 	})
 
 	return p, nil
+}
+
+// SetOnConnectionState 设置连接状态变化回调
+func (p *Peer) SetOnConnectionState(fn func(webrtc.PeerConnectionState)) {
+	p.onConnectionState = fn
 }
 
 // Close 关闭PeerConnection
@@ -280,6 +314,43 @@ func (p *Peer) GetICECandidates() []*webrtc.ICECandidate {
 			return candidates
 		}
 	}
+}
+
+// logConnectionType 检测并记录连接类型（直连/中继）
+func (p *Peer) logConnectionType() {
+	if p.pc == nil {
+		return
+	}
+
+	// 获取统计信息来检查连接类型
+	stats := p.pc.GetStats()
+	for _, stat := range stats {
+		if candidatePair, ok := stat.(webrtc.ICECandidatePairStats); ok && candidatePair.Nominated {
+			localCandidate := stats[candidatePair.LocalCandidateID]
+			remoteCandidate := stats[candidatePair.RemoteCandidateID]
+
+			if local, ok := localCandidate.(webrtc.ICECandidateStats); ok {
+				if remote, ok := remoteCandidate.(webrtc.ICECandidateStats); ok {
+					connType := "P2P Direct"
+					if local.CandidateType == webrtc.ICECandidateTypeRelay || remote.CandidateType == webrtc.ICECandidateTypeRelay {
+						connType = "TURN Relay"
+					} else if local.CandidateType == webrtc.ICECandidateTypePrflx || remote.CandidateType == webrtc.ICECandidateTypePrflx {
+						connType = "P2P Peer Reflexive"
+					} else if local.CandidateType == webrtc.ICECandidateTypeSrflx || remote.CandidateType == webrtc.ICECandidateTypeSrflx {
+						connType = "P2P Server Reflexive (STUN)"
+					}
+
+					fmt.Printf("[WebRTC] Connection established via: %s\n", connType)
+					fmt.Printf("[WebRTC] Local: %s:%d (%s)\n", local.IP, local.Port, local.CandidateType.String())
+					fmt.Printf("[WebRTC] Remote: %s:%d (%s)\n", remote.IP, remote.Port, remote.CandidateType.String())
+					return
+				}
+			}
+		}
+	}
+
+	// 如果无法获取详细统计，显示基本连接信息
+	fmt.Printf("[WebRTC] Connection established (type unknown, stats unavailable)\n")
 }
 
 // Helper functions
