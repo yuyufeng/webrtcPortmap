@@ -2,6 +2,8 @@
 
 const state = {
     signalURL: '',
+    webConsoleBase: '',
+    proxyServiceBase: '',
     userSessionToken: '',
     currentUser: null,
     agentID: '',
@@ -26,6 +28,13 @@ const state = {
 const DEFAULT_TENANT_CODE = 'convnet';
 const DEFAULT_TENANT_NAME = 'convnet';
 const SESSION_STORAGE_KEY = 'webrtc_portmap_session';
+const PREVIEW_PATH_REWRITE_RULES = [
+    {
+        name: 'tenant-static-to-root-static',
+        pattern: /^\/t\/[^/]+\/static\//,
+        replace: '/static/'
+    }
+];
 
 // ==================== 日志工具 ====================
 function log(message, type = 'info') {
@@ -80,7 +89,15 @@ function showAuthPanel(mode) {
 }
 
 function getSignalURL() {
-    return (document.getElementById('signal-url')?.value.trim() || state.signalURL || window.location.origin || '').replace(/\/+$/, '');
+    return (state.signalURL || window.location.origin || '').replace(/\/+$/, '');
+}
+
+function getWebConsoleBase() {
+    return state.webConsoleBase || `${window.location.origin}/webconsole`;
+}
+
+function getProxyServiceBase() {
+    return state.proxyServiceBase || `${window.location.origin}/proxyservice`;
 }
 
 function buildJSONHeaders(includeAuth = true) {
@@ -98,6 +115,8 @@ function saveSessionState() {
     }
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
         signalURL: state.signalURL,
+        webConsoleBase: state.webConsoleBase,
+        proxyServiceBase: state.proxyServiceBase,
         token: state.userSessionToken,
         currentUser: state.currentUser
     }));
@@ -275,14 +294,16 @@ async function registerUser() {
 }
 
 async function loginUser() {
-    state.signalURL = getSignalURL();
+    state.signalURL = window.location.origin;
+    state.webConsoleBase = `${window.location.origin}/webconsole`; 
+    state.proxyServiceBase = `${window.location.origin}/proxyservice`; 
     const payload = {
         tenant_code: DEFAULT_TENANT_CODE,
         username: document.getElementById('login-username')?.value.trim() || '',
         password: document.getElementById('login-password')?.value || ''
     };
     try {
-        const response = await fetch(`${state.signalURL}/auth/login`, {
+        const response = await fetch(`${getSignalURL()}/auth/login`, {
             method: 'POST',
             headers: buildJSONHeaders(false),
             body: JSON.stringify(payload)
@@ -312,12 +333,13 @@ async function restoreLoginSession() {
     const saved = loadSessionState();
     if (!saved?.token) {
         updateLoginVisibility();
+        resumeBouncedPreviewTarget();
         return false;
     }
     state.signalURL = (saved.signalURL || getSignalURL() || window.location.origin || '').replace(/\/+$/, '');
     state.userSessionToken = saved.token;
     try {
-        const response = await fetch(`${state.signalURL}/auth/me`, {
+        const response = await fetch(`${getSignalURL()}/auth/me`, {
             headers: buildJSONHeaders(true)
         });
         if (!response.ok) {
@@ -334,6 +356,7 @@ async function restoreLoginSession() {
         document.getElementById('account-card')?.classList.add('hidden');
         document.getElementById('agent-register-card')?.classList.remove('hidden');
         await listAgents();
+        resumeBouncedPreviewTarget();
         log(`已恢复登录会话: ${state.currentUser.username}`);
         return true;
     } catch (err) {
@@ -347,7 +370,9 @@ async function restoreLoginSession() {
 
 // ==================== Agent列表 ====================
 async function listAgents() {
-    state.signalURL = getSignalURL();
+    state.signalURL = window.location.origin;
+    state.webConsoleBase = `${window.location.origin}/webconsole`; 
+    state.proxyServiceBase = `${window.location.origin}/proxyservice`; 
     if (!state.signalURL) {
         alert('请输入信令服务器URL');
         return;
@@ -359,7 +384,7 @@ async function listAgents() {
 
     try {
         log('获取Agent列表...');
-        const response = await fetch(`${state.signalURL}/controller/list`, { headers: buildJSONHeaders(true) });
+        const response = await fetch(`${getSignalURL()}/controller/list`, { headers: buildJSONHeaders(true) });
         
         if (!response.ok) throw new Error(`获取失败: ${response.status}`);
         
@@ -472,7 +497,7 @@ async function changePassword() {
         return;
     }
     try {
-        const response = await fetch(`${state.signalURL}/auth/change-password`, {
+        const response = await fetch(`${getSignalURL()}/auth/change-password`, {
             method: 'POST',
             headers: buildJSONHeaders(true),
             body: JSON.stringify({
@@ -498,7 +523,7 @@ async function deleteAgent(id, displayName) {
         return;
     }
     try {
-        const response = await fetch(`${state.signalURL}/controller/agent/delete`, {
+        const response = await fetch(`${getSignalURL()}/controller/agent/delete`, {
             method: 'POST',
             headers: buildJSONHeaders(true),
             body: JSON.stringify({ agent_id: id })
@@ -522,7 +547,9 @@ async function deleteAgent(id, displayName) {
 async function connect() {
     resetConnectionState();
 
-    state.signalURL = getSignalURL();
+    state.signalURL = window.location.origin;
+    state.webConsoleBase = `${window.location.origin}/webconsole`; 
+    state.proxyServiceBase = `${window.location.origin}/proxyservice`; 
     const passwordInput = document.getElementById('agent-password');
     state.agentPassword = passwordInput ? passwordInput.value.replace(/^\s+|\s+$/g, '') : '';
     
@@ -547,7 +574,7 @@ async function connect() {
         await state.pc.setLocalDescription(offer);
         await waitForIceGathering();
         
-        await fetch(`${state.signalURL}/controller/send?agent_id=${state.agentID}`, {
+        await fetch(`${getSignalURL()}/controller/send?agent_id=${state.agentID}`, {
             method: 'POST',
             headers: buildJSONHeaders(true),
             body: JSON.stringify({ type: 'offer', sdp: state.pc.localDescription })
@@ -563,7 +590,7 @@ async function connect() {
 }
 
 async function claimWebAgentControl(force) {
-    const response = await fetch(`${state.signalURL}/controller/connect`, {
+    const response = await fetch(`${getSignalURL()}/controller/connect`, {
         method: 'POST',
         headers: buildJSONHeaders(true),
         body: JSON.stringify({ agent_id: state.agentID, force: !!force })
@@ -610,7 +637,7 @@ async function createPeerConnection() {
     
     state.pc.onicecandidate = (event) => {
         if (event.candidate) {
-            fetch(`${state.signalURL}/controller/send?agent_id=${state.agentID}`, {
+            fetch(`${getSignalURL()}/controller/send?agent_id=${state.agentID}`, {
                 method: 'POST',
                 headers: buildJSONHeaders(true),
                 body: JSON.stringify({ type: 'candidate', candidate: event.candidate })
@@ -675,7 +702,7 @@ async function startSignalingPoll() {
         if (!state.pc || state.pc.connectionState === 'closed') return;
         
         try {
-            const response = await fetch(`${state.signalURL}/controller/poll?agent_id=${state.agentID}`, { headers: buildJSONHeaders(true) });
+            const response = await fetch(`${getSignalURL()}/controller/poll?agent_id=${state.agentID}`, { headers: buildJSONHeaders(true) });
             
             if (response.status === 200) {
                 const msg = await response.json();
@@ -1051,6 +1078,30 @@ async function navigatePreviewTo(portID, path) {
     }
 }
 
+function resumeBouncedPreviewTarget() {
+    try {
+        const currentUrl = new URL(window.location.href);
+        const queryBounce = currentUrl.searchParams.get('bounce');
+        const bouncedTarget = queryBounce || sessionStorage.getItem('webrtc_portmap_bounce_target');
+        if (!bouncedTarget) {
+            return;
+        }
+        sessionStorage.removeItem('webrtc_portmap_bounce_target');
+        if (queryBounce) {
+            currentUrl.searchParams.delete('bounce');
+            window.history.replaceState({}, '', currentUrl.pathname + (currentUrl.search ? currentUrl.search : '') + (currentUrl.hash ? currentUrl.hash : ''));
+        }
+        if (!state.selectedHTTPPort) {
+            log(`检测到页面跳转回流，但当前没有选中的服务，已忽略: ${bouncedTarget}`, 'warn');
+            return;
+        }
+        log(`恢复跳转页面: ${bouncedTarget}`);
+        navigatePreviewTo(state.selectedHTTPPort, bouncedTarget);
+    } catch (err) {
+        console.warn('resume bounced preview target failed', err);
+    }
+}
+
 async function navigatePreviewModal() {
     const pathInput = document.getElementById('preview-modal-path');
     const serviceSelector = document.getElementById('preview-modal-service');
@@ -1225,6 +1276,20 @@ function normalizeHTTPPath(input) {
     return `/${value}`;
 }
 
+function applyPreviewPathRewriteRules(path) {
+    let result = normalizeHTTPPath(path || '/');
+    for (const rule of PREVIEW_PATH_REWRITE_RULES) {
+        try {
+            if (rule && rule.pattern && rule.pattern.test(result)) {
+                result = result.replace(rule.pattern, rule.replace || '');
+            }
+        } catch (err) {
+            console.warn('preview path rewrite failed', rule && rule.name, err);
+        }
+    }
+    return result;
+}
+
 function utf8ToBase64(text) {
     return btoa(unescape(encodeURIComponent(text || '')));
 }
@@ -1394,10 +1459,23 @@ function isSkippableResourceURL(value) {
         value.startsWith('//');
 }
 
+function getPreviewBaseHref(path) {
+    const normalized = normalizeHTTPPath(path || '/');
+    const withoutQuery = normalized.split('#')[0].split('?')[0];
+    if (withoutQuery.endsWith('/')) {
+        return withoutQuery;
+    }
+    const idx = withoutQuery.lastIndexOf('/');
+    if (idx >= 0) {
+        return withoutQuery.substring(0, idx + 1) || '/';
+    }
+    return '/';
+}
+
 function resolvePreviewPath(target, currentPath) {
     const base = 'https://dc.local' + normalizeHTTPPath(currentPath || '/');
     const resolved = new URL(target, base);
-    return resolved.pathname + (resolved.search || '') + (resolved.hash || '');
+    return applyPreviewPathRewriteRules(resolved.pathname) + (resolved.search || '') + (resolved.hash || '');
 }
 
 async function fetchDcResource(portID, resourcePath, headers = {}) {
@@ -1506,6 +1584,15 @@ async function preparePreviewHTML(html, meta) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, 'text/html');
         doc.querySelectorAll('base').forEach((node) => node.remove());
+        const base = doc.createElement('base');
+        base.setAttribute('href', getPreviewBaseHref(meta.path));
+        if (doc.head) {
+            doc.head.prepend(base);
+        } else if (doc.documentElement) {
+            const head = doc.createElement('head');
+            head.appendChild(base);
+            doc.documentElement.prepend(head);
+        }
         await inlineLinkedStyles(doc, meta);
         await inlineScriptSources(doc, meta);
         await inlineImageSources(doc, meta);
@@ -1710,7 +1797,9 @@ function injectProxySupport(html, meta) {
   var currentPath = '${escapeJsString(meta.path)}';
   var rawFetch = window.fetch;
   var RawXMLHttpRequest = window.XMLHttpRequest;
+  var RawFormSubmit = window.HTMLFormElement && window.HTMLFormElement.prototype ? window.HTMLFormElement.prototype.submit : null;
   var rawOpen = window.open ? window.open.bind(window) : null;
+  var signalOrigin = window.location.origin;
   function shouldTraceResource(value) {
     var raw = String(value || '');
     return /logo\\.png(?:[?#].*)?$/i.test(raw) || /controller\\.js(?:[?#].*)?$/i.test(raw) || /layui(?:\\.all)?\\.js(?:[?#].*)?$/i.test(raw);
@@ -1723,16 +1812,43 @@ function injectProxySupport(html, meta) {
       console.warn('[dc-trace]', stage, value, extra || '');
     }
   }
+  function applyPathRewriteRules(path) {
+    var result = path || '/';
+    var rules = Array.isArray(window.parent.PREVIEW_PATH_REWRITE_RULES) ? window.parent.PREVIEW_PATH_REWRITE_RULES : [];
+    rules.forEach(function(rule) {
+      try {
+        if (rule && rule.pattern && rule.pattern.test(result)) {
+          result = result.replace(rule.pattern, rule.replace || '');
+        }
+      } catch (e) {}
+    });
+    return result;
+  }
+  function hasHttpScheme(value) {
+    var lower = String(value || '').toLowerCase();
+    return lower.indexOf('http://') === 0 || lower.indexOf('https://') === 0;
+  }
+  function isSameOriginAbsoluteUrl(value) {
+    try {
+      var parsed = new URL(value, signalOrigin + '/');
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.origin === signalOrigin;
+    } catch (e) {
+      return false;
+    }
+  }
   function normalizePath(value) {
     try {
-      var url = new URL(value, 'https://dc.local' + (currentPath.startsWith('/') ? currentPath : '/' + currentPath));
-      return url.pathname + (url.search || '') + (url.hash || '');
+      var base = isSameOriginAbsoluteUrl(value)
+        ? signalOrigin + (currentPath.startsWith('/') ? currentPath : '/' + currentPath)
+        : 'https://dc.local' + (currentPath.startsWith('/') ? currentPath : '/' + currentPath);
+      var url = new URL(value, base);
+      return applyPathRewriteRules(url.pathname) + (url.search || '') + (url.hash || '');
     } catch (e) {
       return value;
     }
   }
   function isProxyTarget(value) {
-    return !!value && !/^https?:\\/\\//i.test(value) && !String(value).startsWith('//') &&
+    return !!value && (!hasHttpScheme(value) || isSameOriginAbsoluteUrl(value)) && !String(value).startsWith('//') &&
       !String(value).startsWith('data:') && !String(value).startsWith('blob:') &&
       !String(value).startsWith('javascript:') && !String(value).startsWith('mailto:') &&
       !String(value).startsWith('#');
@@ -1842,17 +1958,15 @@ function injectProxySupport(html, meta) {
     event.preventDefault();
     navigateViaProxy(href);
   }, true);
-  document.addEventListener('submit', function(event) {
-    var form = event.target;
-    if (!form || !form.action) return;
-    event.preventDefault();
+  function submitFormViaProxy(form) {
+    if (!form) return false;
     var method = (form.method || 'GET').toUpperCase();
     var actionPath = normalizePath(form.getAttribute('action') || currentPath);
     var formData = new FormData(form);
     if (method === 'GET') {
       var params = new URLSearchParams(formData).toString();
       window.parent.__dcProxyNavigate(portID, params ? actionPath.split('?')[0] + '?' + params : actionPath.split('?')[0]);
-      return;
+      return true;
     }
     var body = new URLSearchParams(formData).toString();
     window.parent.__dcProxyNavigate(portID, actionPath, {
@@ -1860,7 +1974,22 @@ function injectProxySupport(html, meta) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
       body: body
     });
+    return true;
+  }
+  document.addEventListener('submit', function(event) {
+    var form = event.target;
+    if (!form || !form.action) return;
+    event.preventDefault();
+    submitFormViaProxy(form);
   }, true);
+  if (RawFormSubmit) {
+    window.HTMLFormElement.prototype.submit = function() {
+      if (submitFormViaProxy(this)) {
+        return;
+      }
+      return RawFormSubmit.call(this);
+    };
+  }
   function DcXMLHttpRequest() {
     this._method = 'GET';
     this._url = '';
@@ -1905,7 +2034,7 @@ function injectProxySupport(html, meta) {
   DcXMLHttpRequest.prototype.send = function(body) {
     var self = this;
     var targetUrl = self._url || '';
-    if (!targetUrl || /^https?:\\/\\//i.test(targetUrl) || targetUrl.startsWith('//')) {
+    if (!targetUrl || ((/^https?:\\/\\//i.test(targetUrl) || targetUrl.startsWith('//')) && !isSameOriginAbsoluteUrl(targetUrl))) {
       var raw = new RawXMLHttpRequest();
       raw.onreadystatechange = function() {
         self.readyState = raw.readyState;
@@ -1963,6 +2092,51 @@ function injectProxySupport(html, meta) {
       return rawOpen(url, target, features);
     };
   }
+  function patchLayerOpen(layerObj) {
+    if (!layerObj || typeof layerObj.open !== 'function' || layerObj.__dcLayerPatched) {
+      return;
+    }
+    var rawLayerOpen = layerObj.open.bind(layerObj);
+    layerObj.open = function(options) {
+      try {
+        if (options && Number(options.type) === 2) {
+          var content = options.content;
+          var targetUrl = '';
+          if (Array.isArray(content) && content.length > 0) {
+            targetUrl = content[0] || '';
+          } else if (typeof content === 'string') {
+            targetUrl = content;
+          }
+          if (targetUrl && navigateViaProxy(targetUrl)) {
+            return -1;
+          }
+        }
+      } catch (e) {
+        console.warn('dc patch layer.open failed', e);
+      }
+      return rawLayerOpen.apply(layerObj, arguments);
+    };
+    layerObj.__dcLayerPatched = true;
+  }
+  patchLayerOpen(window.layer);
+  try {
+    Object.defineProperty(window, 'layer', {
+      configurable: true,
+      enumerable: true,
+      get: function() {
+        return this.__dcLayer;
+      },
+      set: function(value) {
+        this.__dcLayer = value;
+        patchLayerOpen(value);
+      }
+    });
+    if (window.layer) {
+      window.layer = window.layer;
+    }
+  } catch (e) {
+    patchLayerOpen(window.layer);
+  }
   patchLocationMethod('assign');
   patchLocationMethod('replace');
   Object.defineProperty(document, 'cookie', {
@@ -1987,7 +2161,7 @@ function injectProxySupport(html, meta) {
         headers = init.headers;
       }
     }
-    if (!url || /^https?:\\/\\//i.test(url)) {
+    if (!url || (/^https?:\\/\\//i.test(url) && !isSameOriginAbsoluteUrl(url))) {
       return rawFetch.apply(window, arguments);
     }
     return window.parent.__dcProxyFetch(portID, normalizePath(url), {
@@ -2081,7 +2255,7 @@ window.__dcCreateWebSocket = function(portID, url, protocols, currentPath) {
 // ==================== 断开连接 ====================
 function disconnect() {
     if (state.userSessionToken && state.agentID) {
-        fetch(`${state.signalURL}/controller/disconnect`, {
+        fetch(`${getSignalURL()}/controller/disconnect`, {
             method: 'POST',
             headers: buildJSONHeaders(true),
             body: JSON.stringify({ agent_id: state.agentID })
@@ -2126,7 +2300,8 @@ window.onload = async () => {
     if (signalInput && (!signalInput.value || signalInput.value === 'http://localhost:8443')) {
         signalInput.value = window.location.origin;
     }
-    state.signalURL = getSignalURL();
+    state.signalURL = window.location.origin;
+    state.webConsoleBase = `${window.location.origin}/webconsole`; 
     log('Web Controller已加载');
     log('步骤: 1) 登录/注册 2) 查看用户 Hash 与客户端下载 3) 选择 Agent 并输入本地密码连接 4) 发送 HTTP 请求');
     showAuthPanel('login');
@@ -2175,3 +2350,6 @@ window.logoutUser = logoutUser;
 window.openChangePasswordModal = openChangePasswordModal;
 window.closeChangePasswordModal = closeChangePasswordModal;
 window.changePassword = changePassword;
+window.PREVIEW_PATH_REWRITE_RULES = PREVIEW_PATH_REWRITE_RULES;
+window.WEB_CONSOLE_BASE = getWebConsoleBase();
+window.PROXY_SERVICE_BASE = getProxyServiceBase();

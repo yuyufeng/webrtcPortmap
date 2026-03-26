@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/smtp"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -122,9 +123,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/download/client/linux", s.withCORS(s.handleDownloadClientLinux))
 	mux.HandleFunc("/download/client/mac", s.withCORS(s.handleDownloadClientMac))
 	mux.HandleFunc("/status", s.withCORS(s.handleStatus))
-	mux.HandleFunc("/", s.handleStaticFiles)
+	mux.HandleFunc("/webconsole", s.handleWebConsoleRoot)
+	mux.HandleFunc("/webconsole/", s.handleStaticFiles)
+	mux.HandleFunc("/proxyservice", s.handleProxyServiceRoot)
+	mux.HandleFunc("/proxyservice/", s.handleStaticFiles)
+	mux.HandleFunc("/", s.handleRoot)
 	fmt.Printf("[Signaling] Server starting on http://%s\n", s.addr)
-	fmt.Printf("[Signaling] Web UI: http://%s/\n", s.addr)
+	fmt.Printf("[Signaling] Web UI: http://%s/webconsole/\n", s.addr)
 	return http.ListenAndServe(s.addr, mux)
 }
 
@@ -142,16 +147,56 @@ func (s *Server) withCORS(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/" {
+		http.Redirect(w, r, "/webconsole/", http.StatusFound)
+		return
+	}
+	if r.Method == http.MethodGet && !isBuiltInPath(r.URL.Path) {
+		s.renderWebConsoleBounce(w, r)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleWebConsoleRoot(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/webconsole/", http.StatusFound)
+}
+
+func (s *Server) handleProxyServiceRoot(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/proxyservice/", http.StatusFound)
+}
+
+func isBuiltInPath(path string) bool {
+	return strings.HasPrefix(path, "/agent/") ||
+		strings.HasPrefix(path, "/auth/") ||
+		strings.HasPrefix(path, "/controller/") ||
+		strings.HasPrefix(path, "/client/") ||
+		strings.HasPrefix(path, "/download/") ||
+		strings.HasPrefix(path, "/status") ||
+		strings.HasPrefix(path, "/webconsole/") ||
+		path == "/webconsole" ||
+		strings.HasPrefix(path, "/proxyservice/") ||
+		path == "/proxyservice"
+}
+
+func (s *Server) renderWebConsoleBounce(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.RequestURI()
+	http.Redirect(w, r, "/proxyservice/?bounce="+url.QueryEscape(target), http.StatusFound)
+}
+
 func (s *Server) handleStaticFiles(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/agent/") ||
-		strings.HasPrefix(r.URL.Path, "/controller/") ||
-		strings.HasPrefix(r.URL.Path, "/client/") ||
-		strings.HasPrefix(r.URL.Path, "/status") {
+	var path string
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/webconsole/"):
+		path = strings.TrimPrefix(r.URL.Path, "/webconsole")
+	case strings.HasPrefix(r.URL.Path, "/proxyservice/"):
+		path = strings.TrimPrefix(r.URL.Path, "/proxyservice")
+	default:
 		http.NotFound(w, r)
 		return
 	}
-	path := r.URL.Path
-	if path == "/" {
+	if path == "" || path == "/" {
 		path = "/index.html"
 	}
 	path = strings.TrimPrefix(path, "/")
@@ -165,13 +210,7 @@ func (s *Server) handleStaticFiles(w http.ResponseWriter, r *http.Request) {
 	webPath := "web/static/" + path
 	data, err := staticFiles.ReadFile(webPath)
 	if err != nil {
-		data, err = staticFiles.ReadFile("web/static/index.html")
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", getContentType(path))
