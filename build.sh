@@ -14,6 +14,19 @@ echo ""
 
 mkdir -p $BUILD_DIR
 
+echo "[0/3] Syncing Go modules (go mod tidy)..."
+go mod tidy
+echo "[OK] modules synced"
+echo ""
+
+echo "[0b/3] Vendoring xterm.js front-end assets..."
+if bash "$(dirname "$0")/fetch-xterm.sh"; then
+    echo "[OK] xterm assets ready"
+else
+    echo "[WARN] xterm vendoring failed (no network?). Web terminal UI may not load until fetch-xterm.sh succeeds."
+fi
+echo ""
+
 echo "[1/3] Building signaling server (with Web UI)..."
 go build -ldflags="-s -w" -o $BUILD_DIR/signaling ./cmd/signaling
 echo "[OK] signaling built successfully"

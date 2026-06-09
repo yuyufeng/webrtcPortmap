@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,15 @@ type UserRecord struct {
 	EmailVerified  bool      `json:"email_verified"`
 	CreatedAt      time.Time `json:"created_at"`
 	LastLoginAt    time.Time `json:"last_login_at"`
+
+	// 管理员标记（由启动时 -admin-config 配置文件指定，非持久权威来源）。
+	IsAdmin bool `json:"is_admin,omitempty"`
+
+	// TURN 中转额度（0 表示不限）：
+	MaxBps            int64  `json:"max_bps,omitempty"`             // 每会话带宽上限（字节/秒）
+	MonthlyQuotaBytes int64  `json:"monthly_quota_bytes,omitempty"` // 每月累计中转流量上限（字节）
+	UsedBytes         int64  `json:"used_bytes,omitempty"`          // 本月已用中转流量（字节）
+	QuotaMonth        string `json:"quota_month,omitempty"`         // 当前计量月份，格式 "2006-01"
 }
 
 type AgentRegistration struct {
@@ -302,6 +312,178 @@ func (ds *DataStore) ChangeUserPassword(userID, oldPassword, newPassword string)
 	user.PasswordSalt = salt
 	user.PasswordHash = hash
 	return ds.saveLocked()
+}
+
+// currentMonth 返回当前计量月份键，格式 "2006-01"。
+func currentMonth() string {
+	return time.Now().Format("2006-01")
+}
+
+// GetUserByID 按 ID 返回用户（只读）。
+func (ds *DataStore) GetUserByID(userID string) *UserRecord {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+	return ds.data.Users[userID]
+}
+
+// ListUsers 返回指定租户下的全部用户副本（按用户名排序），供管理员查看。
+// 返回浅拷贝，避免外部读到时与内部并发写竞争。
+func (ds *DataStore) ListUsers(tenantCode string) []UserRecord {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+	tenantCode = normalizeTenantCode(tenantCode)
+	result := make([]UserRecord, 0, len(ds.data.Users))
+	for _, user := range ds.data.Users {
+		if user == nil {
+			continue
+		}
+		if tenantCode != "" && user.TenantCode != tenantCode {
+			continue
+		}
+		result = append(result, *user)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Username < result[j].Username })
+	return result
+}
+
+// SetUserQuota 设置某用户的带宽上限与月度流量上限（字节）。
+func (ds *DataStore) SetUserQuota(userID string, maxBps, monthlyQuotaBytes int64) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	user := ds.data.Users[userID]
+	if user == nil {
+		return fmt.Errorf("user not found")
+	}
+	if maxBps < 0 {
+		maxBps = 0
+	}
+	if monthlyQuotaBytes < 0 {
+		monthlyQuotaBytes = 0
+	}
+	user.MaxBps = maxBps
+	user.MonthlyQuotaBytes = monthlyQuotaBytes
+	return ds.saveLocked()
+}
+
+// rollMonthLocked 在调用方已持锁的前提下，按当前月份滚动用量（跨月清零）。
+func rollMonthLocked(user *UserRecord) {
+	m := currentMonth()
+	if user.QuotaMonth != m {
+		user.QuotaMonth = m
+		user.UsedBytes = 0
+	}
+}
+
+// AddUserUsage 累加某用户本月已用中转流量；跨月自动清零后再计。
+// delta<=0 时仅做跨月滚动检查。返回累加后的本月用量。
+func (ds *DataStore) AddUserUsage(userID string, delta int64) (int64, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	user := ds.data.Users[userID]
+	if user == nil {
+		return 0, fmt.Errorf("user not found")
+	}
+	rollMonthLocked(user)
+	if delta > 0 {
+		user.UsedBytes += delta
+	}
+	if err := ds.saveLocked(); err != nil {
+		return user.UsedBytes, err
+	}
+	return user.UsedBytes, nil
+}
+
+// ResetUserUsage 把某用户本月已用流量清零（管理员手动重置/加额时用）。
+func (ds *DataStore) ResetUserUsage(userID string) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	user := ds.data.Users[userID]
+	if user == nil {
+		return fmt.Errorf("user not found")
+	}
+	user.QuotaMonth = currentMonth()
+	user.UsedBytes = 0
+	return ds.saveLocked()
+}
+
+// UserQuotaSnapshot 是给 TURN 计量/鉴权用的额度快照。
+type UserQuotaSnapshot struct {
+	Found             bool
+	MaxBps            int64
+	MonthlyQuotaBytes int64
+	UsedBytes         int64
+	Exhausted         bool // 月度额度已用满（MonthlyQuotaBytes>0 且 UsedBytes>=上限）
+}
+
+// UserQuota 返回某用户的额度快照（含跨月滚动后的本月用量判定）。
+// 注意：此方法只读，不落盘；跨月清零会在下一次 AddUserUsage 时持久化。
+func (ds *DataStore) UserQuota(userID string) UserQuotaSnapshot {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+	user := ds.data.Users[userID]
+	if user == nil {
+		return UserQuotaSnapshot{}
+	}
+	used := user.UsedBytes
+	if user.QuotaMonth != currentMonth() {
+		used = 0 // 逻辑上已跨月清零
+	}
+	exhausted := user.MonthlyQuotaBytes > 0 && used >= user.MonthlyQuotaBytes
+	return UserQuotaSnapshot{
+		Found:             true,
+		MaxBps:            user.MaxBps,
+		MonthlyQuotaBytes: user.MonthlyQuotaBytes,
+		UsedBytes:         used,
+		Exhausted:         exhausted,
+	}
+}
+
+// UserUsageExhausted 返回某用户本月中转额度是否已用满（用于 TURN QuotaHandler）。
+func (ds *DataStore) UserUsageExhausted(userID string) bool {
+	return ds.UserQuota(userID).Exhausted
+}
+
+// ApplyAdmins 按给定的 admin 键集合（"tenant:username" 或 "username"，后者按默认租户）
+// 重置所有用户的 IsAdmin 标记：命中者置 true，其余清 false。启动时调用一次。
+// 返回实际命中的管理员用户名列表。
+func (ds *DataStore) ApplyAdmins(adminKeys []string, defaultTenant string) []string {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	want := map[string]bool{}
+	for _, raw := range adminKeys {
+		k := strings.TrimSpace(raw)
+		if k == "" {
+			continue
+		}
+		if !strings.Contains(k, ":") {
+			k = normalizeTenantCode(defaultTenant) + ":" + normalizeUsername(k)
+		} else {
+			parts := strings.SplitN(k, ":", 2)
+			k = tenantUserKey(parts[0], parts[1])
+		}
+		want[k] = true
+	}
+
+	var matched []string
+	changed := false
+	for _, user := range ds.data.Users {
+		if user == nil {
+			continue
+		}
+		shouldBeAdmin := want[tenantUserKey(user.TenantCode, user.Username)]
+		if user.IsAdmin != shouldBeAdmin {
+			user.IsAdmin = shouldBeAdmin
+			changed = true
+		}
+		if shouldBeAdmin {
+			matched = append(matched, user.Username)
+		}
+	}
+	if changed {
+		_ = ds.saveLocked()
+	}
+	return matched
 }
 
 func (ds *DataStore) MarkEmailVerified(email string) error {

@@ -60,6 +60,7 @@
 - **加密鉴权**: 基于密码的挑战-响应鉴权机制
 - **双访问方式**: 支持浏览器访问，也支持独立 CLI 客户端做本地端口映射
 - **端口级控制**: Agent可精确控制每个端口的访问权限
+- **内嵌持久终端**: Agent 可内嵌 ttyd 式的持久 shell（cmd/powershell/bash/sh），断线重连不重置、自动回放历史输出
 
 ## 快速开始
 
@@ -183,6 +184,49 @@ go build -o bin/client ./cmd/client
 - `http://127.0.0.1:18080` -> Agent 的 `http`
 - `https://127.0.0.1:18443` -> Agent 的 `https`
 
+## 内嵌终端（持久 PTY）
+
+Agent 可内嵌一个**持久的** shell 会话（类似 ttyd），通过 WebRTC DataChannel 提供远程终端。
+特点：
+
+- **一个 Agent 独享一个会话**：cmd / powershell / bash / sh 任选其一，整机共用同一个会话。
+- **断线不重置反馈**：终端进程的生命周期独立于 WebRTC 连接。连接断开时只解除输出回调，进程继续运行，输出持续写入环形缓冲；重新连接后自动回放历史输出，恢复到断线前的画面。
+- **跨平台**：Windows 走 ConPTY（cmd/powershell），Linux/macOS 走标准 PTY（bash/sh）。
+
+### 启动带终端的 Agent
+
+```bash
+./bin/agent -id myserver -name "My Server" -owner-hash <user_hash> -password mysecret \
+  -signal http://signaling.example.com:8443 -signal-token MySecretToken \
+  -terminal -terminal-shell bash
+```
+
+终端相关参数：
+
+| 参数 | 说明 | 默认 |
+|------|------|------|
+| `-terminal` | 启用内嵌终端 | 关闭 |
+| `-terminal-shell` | `cmd`/`powershell`/`bash`/`sh` 或完整路径 | 按平台自动选择（Windows=cmd，Unix=$SHELL/bash/sh） |
+| `-terminal-buffer` | 回放环形缓冲大小（KB） | 256 |
+| `-terminal-cwd` | 终端工作目录 | 当前目录 |
+
+### Web 端使用
+
+鉴权成功后，若 Agent 启用了终端，页面会出现「🖥️ 远程终端」卡片，点击「打开终端」即可（基于 xterm.js）。
+断线后重新连接并鉴权，终端会自动重新附着并回放历史输出。
+
+> xterm.js 已**本地内置**：构建脚本会在编译前调用 `fetch-xterm.sh` / `fetch-xterm.bat` 把资源下载到 `cmd/signaling/web/static/vendor/`，再通过 `go:embed` 一并嵌入信令服务器二进制。**运行/部署时不依赖外网或 CDN**，只需构建机在编译时能访问一次 jsdelivr。若构建机也离线，手动放置这三个文件到 vendor 目录即可：`xterm.min.js`、`xterm.min.css`、`xterm-addon-fit.min.js`。
+
+### CLI 端使用
+
+```bash
+./bin/client -signal http://signaling.example.com:8443 \
+  -username demo -user-password demo123 \
+  -agent myserver -agent-password mysecret -term
+```
+
+进入后本地控制台进入 raw 模式，与远端 shell 双向交互；按 **Ctrl-]** 退出（仅断开本地连接，远端会话保持运行，下次 `-term` 重连可回放）。
+
 ## Agent端口配置
 
 Agent通过JSON文件配置端口：
@@ -240,6 +284,7 @@ webrtc-portmap/
 │   ├── auth/               # 加密鉴权
 │   ├── protocol/           # 通信协议
 │   ├── tunnel/             # 端口转发
+│   ├── terminal/           # 持久 PTY 终端会话（跨平台 + 环形缓冲回放）
 │   └── webrtc/             # WebRTC封装
 ├── config/
 │   └── ports.json          # 端口配置示例

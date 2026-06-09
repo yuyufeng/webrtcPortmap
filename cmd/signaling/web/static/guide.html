@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebRTC PortMap · 使用动画指南</title>
+<style>
+  :root{
+    --bg:#0b1020; --bg2:#11182e; --card:#151d35; --line:#26304f;
+    --txt:#e6ebf5; --muted:#93a0bd; --dim:#67739a;
+    --srv:#34d399;     /* 信令服务器 绿 */
+    --agent:#f59e0b;   /* Agent 橙 */
+    --client:#60a5fa;  /* 客户端 蓝 */
+    --turn:#c084fc;    /* TURN 紫 */
+    --accent:#22d3ee;
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+    background:radial-gradient(1200px 700px at 70% -10%,#1a2a4d 0,transparent 60%),
+               radial-gradient(900px 600px at 0% 10%,#152042 0,transparent 55%),
+               var(--bg);
+    color:var(--txt);line-height:1.6;overflow-x:hidden;
+  }
+  a{color:var(--accent);text-decoration:none}
+
+  /* ---------- 顶部导航 ---------- */
+  .nav{
+    position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);
+    background:rgba(11,16,32,.72);border-bottom:1px solid var(--line);
+  }
+  .nav-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;gap:18px;
+    padding:12px 24px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.3px}
+  .brand .dot{width:11px;height:11px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 0 rgba(34,211,238,.6);animation:pulse 2s infinite}
+  @keyframes pulse{70%{box-shadow:0 0 0 9px rgba(34,211,238,0)}100%{box-shadow:0 0 0 0 rgba(34,211,238,0)}}
+  .nav a.link{color:var(--muted);font-size:14px;padding:6px 10px;border-radius:8px;transition:.2s}
+  .nav a.link:hover{color:var(--txt);background:var(--card)}
+  .nav .spacer{flex:1}
+
+  /* ---------- 容器 ---------- */
+  .wrap{max-width:1100px;margin:0 auto;padding:0 24px}
+  section{padding:64px 0;border-bottom:1px solid rgba(38,48,79,.5)}
+  .eyebrow{color:var(--accent);font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase}
+  h1{font-size:clamp(30px,5vw,52px);line-height:1.12;margin:14px 0;font-weight:800;
+     background:linear-gradient(120deg,#fff 10%,#9ad7ff 55%,#7af0d4 100%);
+     -webkit-background-clip:text;background-clip:text;color:transparent}
+  h2{font-size:clamp(24px,3.4vw,34px);margin:6px 0 8px;font-weight:800}
+  .lead{color:var(--muted);font-size:18px;max-width:680px}
+  .sub{color:var(--dim);font-size:15px}
+
+  /* ---------- 入场动画（滚动揭示） ---------- */
+  .reveal{opacity:0;transform:translateY(26px);transition:opacity .7s ease,transform .7s cubic-bezier(.2,.7,.2,1)}
+  .reveal.in{opacity:1;transform:none}
+  .d1{transition-delay:.08s}.d2{transition-delay:.16s}.d3{transition-delay:.24s}.d4{transition-delay:.32s}
+
+  /* ---------- 架构图 ---------- */
+  .diagram{background:linear-gradient(180deg,var(--card),var(--bg2));border:1px solid var(--line);
+    border-radius:18px;padding:8px;margin-top:30px;box-shadow:0 30px 60px -30px rgba(0,0,0,.7)}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;margin:14px 0 4px;font-size:13px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .chip{width:11px;height:11px;border-radius:3px}
+
+  /* 流动数据点 */
+  .flow{stroke-dasharray:5 9;animation:dash 1s linear infinite}
+  @keyframes dash{to{stroke-dashoffset:-28}}
+  .pkt{animation:none}
+  .node-pop{transform-box:fill-box;transform-origin:center;animation:pop .6s both}
+  @keyframes pop{0%{transform:scale(.6);opacity:0}60%{transform:scale(1.08)}100%{transform:scale(1);opacity:1}}
+
+  /* ---------- 卡片网格 ---------- */
+  .grid{display:grid;gap:20px;margin-top:34px}
+  .grid.c3{grid-template-columns:repeat(3,1fr)}
+  .grid.c2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:820px){.grid.c3,.grid.c2{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;
+    position:relative;overflow:hidden;transition:transform .3s,border-color .3s}
+  .card:hover{transform:translateY(-4px);border-color:var(--accent)}
+  .card .ic{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;font-size:22px;margin-bottom:12px}
+  .card h3{font-size:18px;margin-bottom:6px}
+  .card p{color:var(--muted);font-size:14.5px}
+  .tag-srv{color:var(--srv)} .bg-srv{background:rgba(52,211,153,.14)}
+  .tag-agent{color:var(--agent)} .bg-agent{background:rgba(245,158,11,.14)}
+  .tag-client{color:var(--client)} .bg-client{background:rgba(96,165,250,.14)}
+  .tag-turn{color:var(--turn)} .bg-turn{background:rgba(192,132,252,.14)}
+
+  /* ---------- 步骤时间线 ---------- */
+  .steps{position:relative;margin-top:34px;padding-left:34px}
+  .steps::before{content:"";position:absolute;left:11px;top:6px;bottom:6px;width:2px;
+    background:linear-gradient(var(--line),var(--line))}
+  .steps::after{content:"";position:absolute;left:11px;top:6px;width:2px;height:0;
+    background:linear-gradient(180deg,var(--accent),var(--client));transition:height 1.2s ease}
+  .steps.in::after{height:calc(100% - 12px)}
+  .step{position:relative;padding:0 0 26px 0}
+  .step .num{position:absolute;left:-34px;top:0;width:24px;height:24px;border-radius:50%;
+    background:var(--bg2);border:2px solid var(--line);display:grid;place-items:center;
+    font-size:12px;font-weight:700;color:var(--muted)}
+  .step.in .num{border-color:var(--accent);color:var(--accent)}
+  .step h4{font-size:16px;margin-bottom:4px}
+  .step p{color:var(--muted);font-size:14.5px}
+
+  /* ---------- 终端 / 代码块 ---------- */
+  .term{background:#06090f;border:1px solid var(--line);border-radius:12px;margin-top:14px;overflow:hidden;
+    box-shadow:0 20px 40px -24px rgba(0,0,0,.8)}
+  .term .bar{display:flex;align-items:center;gap:7px;padding:10px 14px;background:#0c1220;border-bottom:1px solid var(--line)}
+  .term .bar i{width:11px;height:11px;border-radius:50%;display:inline-block}
+  .term .bar i:nth-child(1){background:#ff5f56}.term .bar i:nth-child(2){background:#ffbd2e}.term .bar i:nth-child(3){background:#27c93f}
+  .term .bar .t{margin-left:8px;color:var(--dim);font-size:12px;font-family:var(--mono)}
+  .term pre{margin:0;padding:16px;font-family:var(--mono);font-size:13.5px;line-height:1.75;color:#cdd6e6;
+    white-space:pre-wrap;word-break:break-word}
+  .term .pr{color:var(--srv)} .term .fl{color:var(--agent)} .term .cm{color:var(--dim)} .term .ok{color:var(--srv)}
+  .term .vl{color:#7dd3fc}
+
+  /* 打字光标行 */
+  .typed{border-right:2px solid var(--accent);animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{border-color:transparent}}
+
+  .pill{display:inline-block;font-family:var(--mono);font-size:12.5px;background:var(--bg2);
+    border:1px solid var(--line);border-radius:6px;padding:1px 7px;color:#bcd0ff}
+  .note{margin-top:16px;padding:14px 16px;border-radius:12px;border:1px solid var(--line);
+    background:rgba(245,158,11,.07);color:#f6d499;font-size:14px}
+  .note b{color:#ffd27a}
+  .note.tip{background:rgba(52,211,153,.07);color:#bff0d8;border-color:rgba(52,211,153,.3)}
+  .note.tip b{color:#7af0c0}
+
+  /* ---------- 持久终端 断线重连演示 ---------- */
+  .life{background:linear-gradient(180deg,#0c1426,#080d1a);border:1px solid var(--line);border-radius:16px;
+    margin-top:24px;overflow:hidden;box-shadow:0 30px 60px -30px rgba(0,0,0,.7)}
+  .life-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 16px;
+    border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
+  .life .badge{display:inline-flex;align-items:center;gap:8px;font-weight:700;padding:5px 12px;
+    border-radius:999px;border:1px solid var(--line);transition:.4s}
+  .life .badge i{width:9px;height:9px;border-radius:50%;display:inline-block;transition:.4s}
+  .life .dev .who{color:var(--txt);font-weight:700}
+  .life .scr{position:relative;padding:18px;font-family:var(--mono);font-size:13.5px;line-height:1.95;
+    min-height:184px;transition:filter .5s,opacity .5s}
+  .scrline{color:#cdd6e6;white-space:pre-wrap}
+  .scrline.cm{color:var(--dim)}
+  .scrline .ok{color:var(--srv)} .scrline .vl{color:#7dd3fc}
+  .run{color:var(--accent);animation:blink 1s steps(1) infinite}
+  .replay-line{color:#f6d499;display:none}
+  .life .overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:9px;text-align:center;background:rgba(8,13,26,.82);backdrop-filter:blur(3px);
+    opacity:0;pointer-events:none;transition:opacity .5s;padding:16px}
+  .ov-icon{font-size:36px}.ov-t{font-weight:800;font-size:17px;color:#ffb4b4}
+  .ov-s{font-size:13px;color:var(--muted);max-width:420px}
+  .life-foot{padding:11px 16px;border-top:1px solid var(--line);font-size:12.5px;font-family:var(--mono);
+    color:var(--dim);min-height:40px;display:flex;align-items:center}
+  .life[data-phase="online"] .badge{color:#7af0c0;border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.1)}
+  .life[data-phase="online"] .badge i{background:var(--srv);box-shadow:0 0 8px var(--srv)}
+  .life[data-phase="offline"] .scr{filter:grayscale(.7) brightness(.5)}
+  .life[data-phase="offline"] .overlay{opacity:1}
+  .life[data-phase="offline"] .badge{color:#ffb4b4;border-color:rgba(244,67,54,.4);background:rgba(244,67,54,.1)}
+  .life[data-phase="offline"] .badge i{background:#f87171}
+  .life[data-phase="replay"] .badge{color:#ffd27a;border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.1)}
+  .life[data-phase="replay"] .badge i{background:var(--agent);box-shadow:0 0 8px var(--agent)}
+  .life[data-phase="replay"] .replay-line{display:block;animation:fadein .5s}
+  @keyframes fadein{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+
+  /* ---------- 端口表 ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:18px;font-size:14px}
+  th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:1px}
+  td .pill{font-size:12px}
+
+  footer{padding:40px 0 70px;text-align:center;color:var(--dim);font-size:13px}
+  .toc{display:flex;gap:10px;flex-wrap:wrap;margin-top:28px}
+  .toc a{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:8px 16px;
+    font-size:14px;color:var(--muted);transition:.2s}
+  .toc a:hover{border-color:var(--accent);color:var(--txt)}
+</style>
+</head>
+<body>
+
+<!-- ===== 导航 ===== -->
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="brand"><span class="dot"></span>WebRTC PortMap</div>
+    <div class="spacer"></div>
+    <a class="link" href="#why">为什么</a>
+    <a class="link" href="#how">原理</a>
+    <a class="link" href="#server">信令服务器</a>
+    <a class="link" href="#agent">Agent</a>
+    <a class="link" href="#client">客户端</a>
+    <a class="link" href="/">← 返回控制台</a>
+  </div>
+</nav>
+
+<!-- ===== Hero ===== -->
+<section id="overview" class="wrap">
+  <div class="reveal in">
+    <div class="eyebrow">为 AI CLI 而生 · 持久远程终端</div>
+    <h1>AI 在内网那台机器上跑，<br>你在哪都能接回去</h1>
+    <p class="lead">你的 <b style="color:var(--accent)">AI 编程 CLI</b>（Claude Code、Codex、aider…）跑在公司工作站或家里的台式机上，正在执行一个长任务。人却出门了。<b style="color:var(--client)">webrtc-portmap</b> 给那台机器一个 <b>P2P 持久终端</b>：用手机或笔记本随时接回去，<b style="color:var(--srv)">断线重连不重置、AI 进程从不中断</b>。</p>
+    <div class="toc">
+      <a href="#why">😖 它解决什么痛点</a>
+      <a href="#how">⚙️ 工作原理</a>
+      <a href="#server">① 信令服务器</a>
+      <a href="#agent">② Agent</a>
+      <a href="#client">③ 客户端</a>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 为什么 / 痛点场景 ===== -->
+<section id="why" class="wrap">
+  <div class="reveal">
+    <div class="eyebrow tag-client">THE PAIN · 痛点</div>
+    <h2>把 AI CLI 跑在远端，最难受的是这三件事</h2>
+    <p class="sub">尤其当 AI 正在跑一个几十分钟的任务、而你必须离开屏幕的时候。</p>
+  </div>
+
+  <div class="grid c3">
+    <div class="card reveal d1">
+      <div class="ic bg-agent tag-agent">🚧</div>
+      <h3>① 那台机器在 NAT 后面</h3>
+      <p>公司/家里的机器<b>没有公网 IP</b>，被防火墙挡着。想从外面连进去跑/看 AI CLI，要么搭跳板机、要么开端口转发——麻烦又不安全。</p>
+    </div>
+    <div class="card reveal d2">
+      <div class="ic bg-client tag-client">📵</div>
+      <h3>② 一断线，AI 会话就没了</h3>
+      <p>SSH/普通终端一旦网络抖动或合上笔记本，<b>会话断开、AI 进程被挂起或杀掉</b>，几十分钟的上下文和输出全丢，只能从头再来。</p>
+    </div>
+    <div class="card reveal d3">
+      <div class="ic bg-srv tag-srv">🔀</div>
+      <h3>③ 想换设备接着用</h3>
+      <p>在工位上启动了任务，想在沙发上用手机、或换台笔记本<b>接着同一个会话</b>看进度、继续输入——传统方案做不到无缝接管。</p>
+    </div>
+  </div>
+
+  <!-- 持久终端：断线重连演示 -->
+  <div class="reveal" style="margin-top:40px">
+    <div class="eyebrow tag-srv">THE FIX · 解法</div>
+    <h2>持久终端：断线，但进程从不中断</h2>
+    <p class="sub">终端进程挂在 Agent 上，<b>独立于网络连接</b>。你断开时它继续跑、输出写进环形缓冲；你重连时先回放历史、再接实时流。</p>
+  </div>
+
+  <div class="life reveal d1" id="lifeDemo" data-phase="online">
+    <div class="life-head">
+      <span class="badge"><i></i><b class="bt"></b></span>
+      <span class="dev">在 <b class="who">工位电脑</b> 操作</span>
+    </div>
+    <div class="scr">
+      <div class="scrline replay-line">↺ 重连 · 回放历史输出 1.2KB（断线期间的全部内容）…</div>
+      <div class="scrline cm">$ claude  <span style="color:#4b5563"># 你的 AI CLI 跑在内网 Agent 上</span></div>
+      <div class="scrline">● 分析仓库结构… <span class="ok">done</span></div>
+      <div class="scrline">● 运行测试 <span class="vl">7/12</span> 通过…</div>
+      <div class="scrline">● 编辑 <span class="vl">cmd/signaling/main.go</span></div>
+      <div class="scrline live">● 生成补丁 <span class="run">▍</span></div>
+      <div class="overlay">
+        <div class="ov-icon">🔌</div>
+        <div class="ov-t">你的设备断开了</div>
+        <div class="ov-s">Agent 上的 shell 仍在运行 · 输出持续写入环形缓冲(256KB)</div>
+      </div>
+    </div>
+    <div class="life-foot">
+      <span class="fbt"></span>
+    </div>
+  </div>
+
+  <div class="grid c3 reveal d2" style="margin-top:26px">
+    <div class="card">
+      <div class="ic bg-srv tag-srv">🔌</div>
+      <h3>无需公网 IP</h3>
+      <p>WebRTC P2P 直接打洞建连，打不通时自动回退内嵌 TURN 中转。Agent 主动外联，<b>不用在内网开任何入站端口</b>。</p>
+    </div>
+    <div class="card">
+      <div class="ic bg-srv tag-srv">♻️</div>
+      <h3>断线不重置</h3>
+      <p>断开只解除输出回调、<b>不杀进程</b>；重连用 <span class="pill">AttachWithReplay</span> 先回放快照再接实时流，回放在前实时在后，不漏不重。</p>
+    </div>
+    <div class="card">
+      <div class="ic bg-srv tag-srv">📱</div>
+      <h3>换设备无缝接管</h3>
+      <p>手机扫码 / 浏览器打开 / CLI <span class="pill">-term</span>，接进<b>同一个会话</b>，cwd、历史、运行中的 AI 任务原样还在。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 原理 ===== -->
+<section id="how" class="wrap">
+  <div class="reveal">
+    <div class="eyebrow">HOW IT WORKS · 原理</div>
+    <h2>它是怎么把内网那台机器接出来的</h2>
+    <p class="sub">三个角色：公网信令服务器牵线，客户端与内网 Agent 之间走 P2P 加密直连。</p>
+  </div>
+
+  <!-- 架构动画图 -->
+  <div class="diagram reveal d1">
+    <svg viewBox="0 0 960 380" width="100%" role="img" aria-label="架构图">
+      <defs>
+        <linearGradient id="gline" x1="0" x2="1">
+          <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#60a5fa"/>
+        </linearGradient>
+        <filter id="glow"><feGaussianBlur stdDeviation="3.2" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+
+      <!-- 连线：客户端 -> 信令 -->
+      <path id="p_cs" d="M 195 120 C 360 70, 560 70, 715 120" fill="none"
+            stroke="#3b4a78" stroke-width="2.2" class="flow"/>
+      <!-- 连线：Agent -> 信令 -->
+      <path id="p_as" d="M 765 200 C 800 160, 800 150, 770 130" fill="none"
+            stroke="#3b4a78" stroke-width="2.2" class="flow"/>
+      <!-- 连线：Agent 上报信令 长弧 -->
+      <path id="p_as2" d="M 600 300 C 680 250, 720 200, 745 150" fill="none"
+            stroke="#3b4a78" stroke-width="2.2" class="flow"/>
+      <!-- P2P 直连：客户端 <-> Agent -->
+      <path id="p_p2p" d="M 165 165 C 300 320, 470 330, 560 300" fill="none"
+            stroke="url(#gline)" stroke-width="3.4" stroke-dasharray="2 8"
+            class="flow" filter="url(#glow)"/>
+
+      <!-- 流动的数据包 -->
+      <circle r="5.5" fill="#34d399"><animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#p_cs"/></animateMotion></circle>
+      <circle r="5.5" fill="#f59e0b"><animateMotion dur="2.6s" repeatCount="indefinite"><mpath href="#p_as2"/></animateMotion></circle>
+      <circle r="6.5" fill="#22d3ee"><animateMotion dur="1.8s" repeatCount="indefinite" rotate="auto"><mpath href="#p_p2p"/></animateMotion></circle>
+      <circle r="6.5" fill="#a7f3d0"><animateMotion dur="1.8s" begin="0.9s" repeatCount="indefinite"><mpath href="#p_p2p"/></animateMotion></circle>
+
+      <!-- 节点：客户端 -->
+      <g class="node-pop" style="animation-delay:.1s">
+        <rect x="60" y="92" rx="14" width="135" height="86" fill="#101a33" stroke="#60a5fa" stroke-width="1.6"/>
+        <text x="127" y="124" text-anchor="middle" font-size="26">💻</text>
+        <text x="127" y="152" text-anchor="middle" fill="#cfe0ff" font-size="13" font-weight="700">浏览器 / CLI</text>
+        <text x="127" y="169" text-anchor="middle" fill="#6f87bf" font-size="11">客户端</text>
+      </g>
+      <!-- 节点：信令服务器 -->
+      <g class="node-pop" style="animation-delay:.25s">
+        <rect x="650" y="78" rx="14" width="160" height="92" fill="#0f2030" stroke="#34d399" stroke-width="1.6"/>
+        <text x="730" y="112" text-anchor="middle" font-size="26">🛰️</text>
+        <text x="730" y="140" text-anchor="middle" fill="#bff0d8" font-size="13" font-weight="700">信令服务器</text>
+        <text x="730" y="157" text-anchor="middle" fill="#5fae8c" font-size="11">公网 · 含 Web/TURN</text>
+      </g>
+      <!-- 节点：Agent -->
+      <g class="node-pop" style="animation-delay:.4s">
+        <rect x="520" y="270" rx="14" width="160" height="92" fill="#221a08" stroke="#f59e0b" stroke-width="1.6"/>
+        <text x="600" y="304" text-anchor="middle" font-size="26">🖥️</text>
+        <text x="600" y="332" text-anchor="middle" fill="#ffd9a0" font-size="13" font-weight="700">Agent</text>
+        <text x="600" y="349" text-anchor="middle" fill="#b98a3f" font-size="11">内网 · 端口+终端</text>
+      </g>
+
+      <!-- 标注 -->
+      <text x="455" y="62" text-anchor="middle" fill="#7f93c0" font-size="12">① HTTP 信令：交换 SDP / ICE</text>
+      <text x="300" y="250" fill="#7af0d4" font-size="12.5" font-weight="700">② P2P 加密 DataChannel（直连，不过服务器）</text>
+    </svg>
+    <div class="legend">
+      <span><i class="chip" style="background:var(--client)"></i>客户端</span>
+      <span><i class="chip" style="background:var(--srv)"></i>信令服务器</span>
+      <span><i class="chip" style="background:var(--agent)"></i>Agent</span>
+      <span><i class="chip" style="background:var(--accent)"></i>P2P 数据流</span>
+    </div>
+  </div>
+
+  <!-- 三角色卡片 -->
+  <div class="grid c3">
+    <div class="card reveal d1">
+      <div class="ic bg-srv tag-srv">🛰️</div>
+      <h3 class="tag-srv">信令服务器</h3>
+      <p>公网常驻。负责信令交换、账户登录、内嵌 Web 控制台与可选 TURN 中转。<b>终端/端口数据不经过它。</b></p>
+    </div>
+    <div class="card reveal d2">
+      <div class="ic bg-agent tag-agent">🖥️</div>
+      <h3 class="tag-agent">Agent</h3>
+      <p>内网常驻。预配置可访问端口列表，带 <span class="pill">owner-hash</span> 归属用户，可选内嵌持久终端。</p>
+    </div>
+    <div class="card reveal d3">
+      <div class="ic bg-client tag-client">💻</div>
+      <h3 class="tag-client">客户端</h3>
+      <p>浏览器控制台直接用，或 CLI <span class="pill">client</span> 把远端端口映射到本地、进交互终端。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 信令服务器 ===== -->
+<section id="server" class="wrap">
+  <div class="reveal">
+    <div class="eyebrow tag-srv">STEP 1 · 信令服务器</div>
+    <h2>① 部署公网信令服务器</h2>
+    <p class="sub">它是整个系统唯一需要公网的部分，自带 Web 控制台与可选 TURN 中转。</p>
+  </div>
+
+  <div class="steps reveal">
+    <div class="step"><div class="num">1</div>
+      <h4>编译二进制</h4>
+      <p>仓库根目录运行 <span class="pill">buildserver.bat</span>（Windows）或 <span class="pill">./build.sh</span>，构建脚本会自动 <span class="pill">go mod tidy</span> 并下载 xterm 资源嵌入二进制。</p>
+    </div>
+    <div class="step"><div class="num">2</div>
+      <h4>最简启动（仅信令 + Web，纯 STUN 直连）</h4>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i><span class="t">server — 最简</span></div>
+        <pre><span class="cm"># 监听 8443，数据持久化到 data/signaling.json</span>
+<span class="pr">$</span> ./bin/signaling <span class="fl">-addr</span> <span class="vl">0.0.0.0:8443</span> <span class="fl">-data</span> <span class="vl">data/signaling.json</span></pre>
+      </div>
+    </div>
+    <div class="step"><div class="num">3</div>
+      <h4>启用内嵌 TURN 中转（直连失败时回退，推荐）</h4>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i><span class="t">server — 含 TURN + 管理员</span></div>
+        <pre><span class="pr">$</span> ./bin/signaling <span class="fl">-addr</span> <span class="vl">0.0.0.0:8443</span> <span class="fl">-data</span> <span class="vl">data/signaling.json</span> \
+    <span class="fl">-turn-enabled</span> <span class="fl">-turn-public-ip</span> <span class="vl">&lt;公网IP&gt;</span> \
+    <span class="fl">-turn-secret</span> <span class="vl">&lt;固定随机串&gt;</span> <span class="fl">-admin-config</span> <span class="vl">admins.json</span></pre>
+      </div>
+      <div class="note"><b>⚠️ 必读：</b><span class="pill">-turn-public-ip</span> 必须是<b>客户端可达的公网 IP</b>，否则 relay 候选不可用；<span class="pill">-turn-secret</span> 要<b>固定</b>，留空会每次重启随机生成、导致旧凭据失效。</div>
+    </div>
+    <div class="step"><div class="num">4</div>
+      <h4>放行防火墙端口</h4>
+      <table>
+        <tr><th>端口</th><th>协议</th><th>用途</th></tr>
+        <tr><td><span class="pill">8443</span></td><td>TCP</td><td>信令 + Web 控制台（随 <span class="pill">-addr</span> 调整）</td></tr>
+        <tr><td><span class="pill">3478</span></td><td>UDP</td><td>TURN 中继（<b>必须</b>）</td></tr>
+        <tr><td><span class="pill">3478</span></td><td>TCP</td><td>TURN over TCP（建议，UDP 被封时回退）</td></tr>
+      </table>
+    </div>
+    <div class="step"><div class="num">5</div>
+      <h4>打开控制台并注册</h4>
+      <p>浏览器访问 <span class="pill">http://&lt;公网IP&gt;:8443/</span> 注册账号、登录。登录后在页面上能拿到你的 <b>用户 hash（user hash）</b>—— 下一步启动 Agent 要用它做归属。</p>
+    </div>
+  </div>
+
+  <div class="note tip reveal"><b>💡 Linux 生产部署：</b>用 <span class="pill">deploy/</span> 里的 systemd 方案，<span class="pill">sudo ./install.sh ./signaling-linux-amd64</span> 一键装好开机自启，配置在 <span class="pill">/etc/webrtc-portmap/signaling.env</span>。</div>
+</section>
+
+<!-- ===== Agent ===== -->
+<section id="agent" class="wrap">
+  <div class="reveal">
+    <div class="eyebrow tag-agent">STEP 2 · AGENT</div>
+    <h2>② 在内网机器启动 Agent</h2>
+    <p class="sub">Agent 主动连到信令服务器并上报能力；之后等待客户端通过 P2P 接入。</p>
+  </div>
+
+  <div class="grid c2 reveal">
+    <div class="card">
+      <div class="ic bg-agent tag-agent">🔌</div>
+      <h3>端口映射型</h3>
+      <p>把内网服务（如本机 8080 的 http）暴露给授权用户访问。</p>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i><span class="t">agent — 端口</span></div>
+        <pre><span class="pr">$</span> ./bin/agent <span class="fl">-id</span> <span class="vl">myagent</span> <span class="fl">-name</span> <span class="vl">"我的客户端"</span> \
+    <span class="fl">-owner-hash</span> <span class="vl">&lt;user_hash&gt;</span> <span class="fl">-password</span> <span class="vl">&lt;本地密码&gt;</span> \
+    <span class="fl">-signal</span> <span class="vl">http://host:8443</span> \
+    <span class="fl">-ports</span> <span class="vl">ports.json</span></pre>
+      </div>
+    </div>
+    <div class="card">
+      <div class="ic bg-agent tag-agent">🤖</div>
+      <h3>内嵌终端型（跑 AI CLI 的机器选这个）</h3>
+      <p>开一个持久 shell，在里面起你的 AI CLI；<b>断线重连不重置</b>，回放历史输出、进程不重启。</p>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i><span class="t">agent — 终端</span></div>
+        <pre><span class="pr">$</span> ./bin/agent <span class="fl">-id</span> <span class="vl">myagent</span> \
+    <span class="fl">-owner-hash</span> <span class="vl">&lt;user_hash&gt;</span> <span class="fl">-password</span> <span class="vl">&lt;本地密码&gt;</span> \
+    <span class="fl">-signal</span> <span class="vl">http://host:8443</span> \
+    <span class="fl">-terminal</span> <span class="fl">-terminal-shell</span> <span class="vl">powershell</span></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="note tip reveal"><b>🤖 典型链路：</b>在跑 AI CLI 的内网机器上以 <span class="pill">-terminal</span> 启动 Agent → 在它开出的 shell 里运行你的 AI CLI（<span class="pill">claude</span> / <span class="pill">aider</span> …）→ 从任意设备用浏览器「🖥️ 远程终端」或 <span class="pill">client -term</span> 接进去。断网、合盖、换设备都不打断 AI 任务。</div>
+
+  <table class="reveal">
+    <tr><th>关键参数</th><th>说明</th></tr>
+    <tr><td><span class="pill">-id</span> / <span class="pill">-name</span></td><td>Agent 唯一标识 / 显示名</td></tr>
+    <tr><td><span class="pill">-owner-hash</span></td><td>Web 控制台拿到的用户 hash，决定归属（必填）</td></tr>
+    <tr><td><span class="pill">-password</span></td><td>本地鉴权密码，DataChannel 建立后挑战-响应（必填）</td></tr>
+    <tr><td><span class="pill">-signal</span></td><td>信令服务器地址</td></tr>
+    <tr><td><span class="pill">-terminal</span></td><td>启用内嵌持久终端</td></tr>
+    <tr><td><span class="pill">-use-server-turn</span></td><td>默认 <b>true</b>，自动拉取服务器 TURN 凭据并合并进 ICE</td></tr>
+  </table>
+
+  <div class="note reveal"><b>启动成功标志：</b>日志出现 <span class="pill">[Agent] Embedded terminal: ENABLED (shell=..., buffer=256KB)</span>；Web 端鉴权后会出现「🖥️ 远程终端」卡片。</div>
+  <div class="note reveal"><b>想用 TURN 中转？</b>浏览器的 TURN <b>只来自 Agent 上报的 ice_servers</b>。要么保持 <span class="pill">-use-server-turn</span>（配合服务器内嵌 TURN），要么给 Agent 配 <span class="pill">-turn turn:host:3478 -turn-user U -turn-pass P</span>。仅在信令机上跑 TURN 而 Agent 不上报，则没人能 relay。</div>
+</section>
+
+<!-- ===== 客户端 ===== -->
+<section id="client" class="wrap">
+  <div class="reveal">
+    <div class="eyebrow tag-client">STEP 3 · 客户端</div>
+    <h2>③ 客户端接入</h2>
+    <p class="sub">两种方式：浏览器控制台（零安装）或 CLI 客户端（端口映射 / 交互终端）。</p>
+  </div>
+
+  <div class="grid c2">
+    <!-- Web 控制台 -->
+    <div class="card reveal d1">
+      <div class="ic bg-client tag-client">🌐</div>
+      <h3>方式 A · 浏览器控制台</h3>
+      <div class="steps" style="margin-top:18px">
+        <div class="step in"><div class="num">1</div><h4>登录</h4><p>打开 <span class="pill">http://host:8443/</span> 登录账户。</p></div>
+        <div class="step in"><div class="num">2</div><h4>选择 Agent</h4><p>列表里点你的 Agent，输入它的本地密码完成 P2P 鉴权。</p></div>
+        <div class="step in"><div class="num">3</div><h4>使用</h4><p>访问 <span class="pill">allow_access</span> 的端口，或点「🖥️ 远程终端 → 打开终端」用 xterm 终端。</p></div>
+      </div>
+    </div>
+
+    <!-- CLI -->
+    <div class="card reveal d2">
+      <div class="ic bg-client tag-client">⌨️</div>
+      <h3>方式 B · CLI 客户端</h3>
+      <p style="margin-bottom:6px">端口映射 —— 把远端端口绑到本地：</p>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i><span class="t">client — 端口映射</span></div>
+        <pre><span class="pr">$</span> ./bin/client <span class="fl">-signal</span> <span class="vl">http://host:8443</span> \
+    <span class="fl">-username</span> <span class="vl">demo</span> <span class="fl">-user-password</span> <span class="vl">demo123</span> \
+    <span class="fl">-agent</span> <span class="vl">myagent</span> <span class="fl">-agent-password</span> <span class="vl">&lt;pwd&gt;</span> \
+    <span class="fl">-map</span> <span class="vl">127.0.0.1:18080=http</span>
+<span class="ok">✓ mapping 127.0.0.1:18080 → agent:http</span></pre>
+      </div>
+      <p style="margin:14px 0 6px">交互终端 —— <span class="pill">Ctrl-]</span> 退出（仅断开，不杀远端）：</p>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i><span class="t">client — 终端</span></div>
+        <pre><span class="pr">$</span> ./bin/client <span class="fl">-signal</span> <span class="vl">http://host:8443</span> \
+    <span class="fl">-username</span> <span class="vl">demo</span> <span class="fl">-user-password</span> <span class="vl">demo123</span> \
+    <span class="fl">-agent</span> <span class="vl">myagent</span> <span class="fl">-agent-password</span> <span class="vl">&lt;pwd&gt;</span> <span class="fl">-term</span>
+<span class="cm">PS C:\&gt; </span><span class="typed" id="liveType"></span></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="note tip reveal"><b>🔒 四层安全：</b>信令 token 限注册 → 账户登录拿 session → Agent 须带有效 owner-hash → DataChannel 建立后仍需 Agent 本地密码挑战-响应。Web 端只看得到 <span class="pill">allow_access:true</span> 的端口。</div>
+</section>
+
+<footer>
+  WebRTC PortMap · P2P 端口与终端映射 ·
+  <a href="/">返回控制台</a>
+</footer>
+
+<script>
+  // 滚动揭示
+  const io=new IntersectionObserver((es)=>{
+    es.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} });
+  },{threshold:.18});
+  document.querySelectorAll('.reveal,.steps,.step').forEach(el=>io.observe(el));
+
+  // 持久终端：断线重连演示，循环切换三种状态
+  (function(){
+    const life=document.getElementById('lifeDemo');
+    if(!life) return;
+    const phases=[
+      {p:'online', bt:'已连接 · 实时输出',     who:'工位电脑', fbt:'● 实时数据流 · P2P DataChannel',                 ms:2600},
+      {p:'offline',bt:'已断开 · 进程继续运行', who:'工位电脑', fbt:'○ 你已离线 · 输出持续写入环形缓冲(256KB) …',     ms:2600},
+      {p:'replay', bt:'重连 · 回放历史',       who:'📱 手机',  fbt:'✓ 已接回 · 进程从未中断，cwd / 历史 / 任务保持', ms:2900},
+    ];
+    let i=0;
+    (function go(){
+      const f=phases[i];
+      life.dataset.phase=f.p;
+      life.querySelector('.bt').textContent=f.bt;
+      life.querySelector('.who').textContent=f.who;
+      life.querySelector('.fbt').textContent=f.fbt;
+      i=(i+1)%phases.length;
+      setTimeout(go,f.ms);
+    })();
+  })();
+
+  // CLI 终端打字循环演示
+  const lines=['Get-Location','dir','python -m http.server 8080','exit'];
+  const el=document.getElementById('liveType');
+  let li=0,ci=0,del=false;
+  function tick(){
+    if(!el) return;
+    const cur=lines[li];
+    if(!del){
+      el.textContent=cur.slice(0,ci++);
+      if(ci>cur.length){ del=true; return setTimeout(tick,1100); }
+    }else{
+      el.textContent=cur.slice(0,ci--);
+      if(ci<0){ del=false; ci=0; li=(li+1)%lines.length; }
+    }
+    setTimeout(tick, del?38:75);
+  }
+  tick();
+</script>
+</body>
+</html>

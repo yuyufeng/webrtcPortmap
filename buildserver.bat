@@ -13,9 +13,35 @@ set GOARCH=amd64
 
 if not exist %BUILD_DIR% mkdir %BUILD_DIR%
 
+echo [0/2] Syncing Go modules (go mod tidy)...
+go mod tidy
+if %errorlevel% neq 0 (
+    echo [ERROR] go mod tidy failed
+    exit /b 1
+)
+echo [OK] modules synced
+echo.
+
+echo [0b/2] Vendoring xterm.js front-end assets...
+call "%~dp0fetch-xterm.bat"
+if %errorlevel% neq 0 (
+    echo [WARN] xterm vendoring failed ^(no network?^). Web terminal UI may not load until fetch-xterm.bat succeeds.
+)
+echo.
+
+echo [0c/2] Bumping web cache-bust token (forces browsers to reload controller.js)...
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMddHHmmss"') do set CACHEBUST=%%i
+powershell -NoProfile -Command "$f='%~dp0cmd\signaling\web\static\index.html'; $c=[IO.File]::ReadAllText($f); $c=[regex]::Replace($c,'controller\.js\?v=[0-9A-Za-z]+','controller.js?v=%CACHEBUST%'); [IO.File]::WriteAllText($f,$c,[Text.UTF8Encoding]::new($false))"
+if %errorlevel% neq 0 (
+    echo [WARN] cache-bust bump failed; browser may serve cached controller.js. Hard-refresh ^(Ctrl-F5^) if web looks stale.
+) else (
+    echo [OK] controller.js?v=%CACHEBUST%
+)
+echo.
+
 echo [1/2] Building signaling server for Windows...
 set GOOS=windows
-go build -ldflags="-s -w" -o %BUILD_DIR%\signaling.exe .\cmd\signaling
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\signaling.exe .\cmd\signaling
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build signaling server for Windows
     exit /b 1
@@ -26,7 +52,7 @@ echo.
 
 echo [2/2] Building signaling server for Linux...
 set GOOS=linux
-go build -ldflags="-s -w" -o %BUILD_DIR%\signaling-linux-amd64 .\cmd\signaling
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\signaling-linux-amd64 .\cmd\signaling
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build signaling server for Linux
     exit /b 1

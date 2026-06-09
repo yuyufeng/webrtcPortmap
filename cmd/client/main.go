@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
+	"golang.org/x/term"
 	"webrtc-portmap/pkg/auth"
 	"webrtc-portmap/pkg/protocol"
 	"webrtc-portmap/pkg/tunnel"
@@ -135,6 +136,12 @@ type Client struct {
 	mapsMu        sync.Mutex
 	inputMu       sync.Mutex
 	mappingPromptStarted bool
+
+	// 终端模式
+	termMode    bool
+	termOnce    sync.Once
+	termQuitOnce sync.Once
+	termRestore func()
 }
 
 func main() {
@@ -150,6 +157,7 @@ func main() {
 		turnUser      = flag.String("turn-user", "", "TURN username")
 		turnPass      = flag.String("turn-pass", "", "TURN password")
 		iceConfig     = flag.String("ice-config", "", "ICE servers config JSON file (optional, overrides -turn)")
+		termMode      = flag.Bool("term", false, "Attach to the agent's embedded terminal (interactive shell)")
 	)
 	var mappings mapFlags
 	flag.Var(&mappings, "map", "Local port mapping in the form <local_addr>=<port_id>, e.g. 127.0.0.1:18080=http")
@@ -160,6 +168,7 @@ func main() {
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass>")
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -list")
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -agent <agent_id> -agent-password <password> [-map 127.0.0.1:18080=http]")
+		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -agent <agent_id> -agent-password <password> -term")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -172,6 +181,7 @@ func main() {
 		httpClient:    &http.Client{Timeout: 45 * time.Second},
 		stopChan:      make(chan struct{}),
 		maps:          mappings,
+		termMode:      *termMode,
 	}
 	client.tunnelMgr = tunnel.NewManager(client)
 	var err error
@@ -397,7 +407,9 @@ func (c *Client) connect() error {
 		})
 	})
 	peer.SetOnMessage(func(data []byte) {
-		fmt.Printf("[Client] Raw data channel message: %d bytes\n", len(data))
+		if !c.termMode {
+			fmt.Printf("[Client] Raw data channel message: %d bytes\n", len(data))
+		}
 		c.handleMessage(data)
 	})
 	peer.SetOnDataChannelOpen(func() {
@@ -566,7 +578,15 @@ func (c *Client) handleMessage(data []byte) {
 				fmt.Printf("  - %s (%s): %s\n", p.Name, p.ID, p.LocalAddr)
 			}
 		}
-		go c.applyMappings()
+		if c.termMode {
+			if cfg.Terminal == nil || !cfg.Terminal.Enabled {
+				fmt.Printf("[Client] Agent has no embedded terminal enabled (start agent with -terminal)\n")
+				return
+			}
+			go c.startTerminal()
+		} else {
+			go c.applyMappings()
+		}
 	case protocol.MsgTypeConnectResp:
 		if err := c.tunnelMgr.HandleConnectResponse(msg.Payload); err != nil {
 			fmt.Printf("[Client] Connect response failed: %v\n", err)
@@ -583,6 +603,10 @@ func (c *Client) handleMessage(data []byte) {
 		if err := c.tunnelMgr.HandleCloseStream(msg.Payload); err != nil {
 			fmt.Printf("[Client] Close stream failed: %v\n", err)
 		}
+	case protocol.MsgTypeTermData:
+		c.handleTermData(msg.Payload)
+	case protocol.MsgTypeTermExit:
+		c.handleTermExit(msg.Payload)
 	case protocol.MsgTypePing:
 		var ping protocol.Ping
 		if err := json.Unmarshal(msg.Payload, &ping); err == nil {
@@ -590,7 +614,9 @@ func (c *Client) handleMessage(data []byte) {
 			_ = c.sendMessage(pong)
 		}
 	default:
-		fmt.Printf("[Client] Ignored message type: %s\n", msg.Type.String())
+		if !c.termMode {
+			fmt.Printf("[Client] Ignored message type: %s\n", msg.Type.String())
+		}
 	}
 }
 
@@ -799,6 +825,12 @@ func (c *Client) sendMessage(msg *protocol.Message) error {
 }
 
 func (c *Client) cleanup() {
+	// 恢复本地终端模式（若处于终端模式）。注意：仅断开连接，
+	// 不向 agent 发送 TermClose —— agent 端会话保持运行，下次 -term 重连可回放。
+	if c.termRestore != nil {
+		c.termRestore()
+		c.termRestore = nil
+	}
 	if c.sessionToken != "" && c.agentID != "" {
 		body, _ := json.Marshal(map[string]string{"agent_id": c.agentID})
 		req, _ := http.NewRequest(http.MethodPost, c.signalURL+"/client/disconnect", bytes.NewReader(body))
@@ -820,4 +852,107 @@ func (c *Client) cleanup() {
 		c.signalConn = nil
 	}
 	c.authenticated = false
+}
+
+// ==================== 终端模式 ====================
+
+// startTerminal 把本地控制台切到 raw 模式，并与 agent 的持久终端会话双向桥接。
+// 仅运行一次（AgentConfig 可能重复到达）。按 Ctrl-] 退出（退出仅断开，不结束远端会话）。
+func (c *Client) startTerminal() {
+	c.termOnce.Do(func() {
+		fd := int(os.Stdin.Fd())
+		isTTY := term.IsTerminal(fd)
+		if isTTY {
+			if oldState, err := term.MakeRaw(fd); err == nil {
+				c.termRestore = func() { _ = term.Restore(fd, oldState) }
+			}
+		}
+
+		cols, rows := 80, 24
+		if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+			cols, rows = w, h
+		}
+
+		openMsg, _ := protocol.NewMessage(protocol.MsgTypeTermOpen, protocol.TermOpenRequest{Cols: cols, Rows: rows})
+		_ = c.sendMessage(openMsg)
+		fmt.Fprintf(os.Stderr, "\r\n[client] 终端已附着（按 Ctrl-] 退出，远端会话保持运行）\r\n")
+
+		c.watchResize(fd)
+
+		go c.stdinLoop()
+	})
+}
+
+// stdinLoop 读取本地输入并转发到 agent；遇到 Ctrl-](0x1d) 退出。
+func (c *Client) stdinLoop() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n > 0 {
+			data := buf[:n]
+			if idx := bytes.IndexByte(data, 0x1d); idx >= 0 {
+				if idx > 0 {
+					c.sendTermInput(data[:idx])
+				}
+				c.quitTerminal()
+				return
+			}
+			c.sendTermInput(data)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (c *Client) sendTermInput(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	msg, err := protocol.NewMessage(protocol.MsgTypeTermInput, protocol.TermInput{Data: cp})
+	if err != nil {
+		return
+	}
+	_ = c.sendMessage(msg)
+}
+
+func (c *Client) sendTermResize(cols, rows int) {
+	msg, err := protocol.NewMessage(protocol.MsgTypeTermResize, protocol.TermResize{Cols: cols, Rows: rows})
+	if err != nil {
+		return
+	}
+	_ = c.sendMessage(msg)
+}
+
+func (c *Client) handleTermData(payload []byte) {
+	var d protocol.TermData
+	if err := json.Unmarshal(payload, &d); err != nil {
+		return
+	}
+	if len(d.Data) > 0 {
+		_, _ = os.Stdout.Write(d.Data)
+	}
+}
+
+func (c *Client) handleTermExit(payload []byte) {
+	var e protocol.TermExit
+	_ = json.Unmarshal(payload, &e)
+	fmt.Fprintf(os.Stderr, "\r\n[client] 远端 shell 已退出 code=%d %s\r\n", e.Code, e.Message)
+	c.quitTerminal()
+}
+
+// quitTerminal 退出终端模式：恢复本地终端并结束进程（不结束远端会话）。
+// 用 sync.Once 保证只执行一次，避免 stdin 与退出通知并发触发导致重复 close。
+func (c *Client) quitTerminal() {
+	c.termQuitOnce.Do(func() {
+		if c.termRestore != nil {
+			c.termRestore()
+			c.termRestore = nil
+		}
+		close(c.stopChan)
+		c.cleanup()
+		os.Exit(0)
+	})
 }

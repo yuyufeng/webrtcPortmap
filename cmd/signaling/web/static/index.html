@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebRTC PortMap - HTTP Web Console</title>
+    <!-- xterm.js 本地内置（由构建脚本 fetch-xterm 下载到 vendor/ 并随二进制 go:embed 嵌入，运行时不依赖外网/CDN） -->
+    <link rel="stylesheet" href="vendor/xterm.min.css">
+    <script src="vendor/xterm.min.js"></script>
+    <script src="vendor/xterm-addon-fit.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -571,6 +575,15 @@
         </div>
         <h1>🌐 WebRTC PortMap - HTTP Web Console</h1>
         <p class="subtitle">通过 WebRTC P2P 连接访问 Agent 本地 HTTP 服务</p>
+        <p style="text-align:center;margin:-10px 0 20px;">
+            <a href="guide.html" target="_blank" rel="noopener"
+               style="display:inline-flex;align-items:center;gap:6px;padding:7px 16px;border-radius:999px;
+                      background:#eef2ff;color:#4338ca;font-size:14px;font-weight:600;text-decoration:none;
+                      border:1px solid #dbe1ff;transition:background .2s;"
+               onmouseover="this.style.background='#e0e7ff'" onmouseout="this.style.background='#eef2ff'">
+                📖 使用指南（服务器 / 客户端动画说明）
+            </a>
+        </p>
 
         <input type="hidden" id="signal-url" value="">
 
@@ -700,11 +713,38 @@
             </details>
         </div>
 
+        <div class="card hidden" id="my-quota-card">
+            <h2>📊 我的中转额度</h2>
+            <div id="my-quota-body" class="toolbar-note">加载中…</div>
+        </div>
+
         <div class="card hidden" id="agents-card">
             <h2>📋 步骤2: 选择我的 Agent</h2>
             <div class="current-user" id="agent-list-user"></div>
             <ul class="agent-list" id="agent-list"></ul>
             <button class="btn btn-secondary mt-4" onclick="listAgents()">刷新列表</button>
+        </div>
+
+        <div class="card hidden" id="admin-user-mgmt-card">
+            <h2>👥 用户管理（管理员）</h2>
+            <div class="toolbar-note">为用户分配 TURN 中转额度：<b>限速 (Mbps，每会话)</b> 与 <b>月度流量上限 (GB)</b>。0 表示不限。流量每月自动重置。</div>
+            <div id="admin-turn-note" class="toolbar-note"></div>
+            <div style="overflow-x:auto;">
+                <table id="admin-users-table" style="width:100%;border-collapse:collapse;font-size:14px;">
+                    <thead>
+                        <tr style="text-align:left;border-bottom:1px solid #ddd;">
+                            <th style="padding:6px;">用户名</th>
+                            <th style="padding:6px;">邮箱</th>
+                            <th style="padding:6px;">本月已用</th>
+                            <th style="padding:6px;">月度上限 (GB)</th>
+                            <th style="padding:6px;">限速 (Mbps)</th>
+                            <th style="padding:6px;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="admin-users-tbody"></tbody>
+                </table>
+            </div>
+            <button class="btn btn-secondary mt-4" onclick="loadAdminUsers()">刷新</button>
         </div>
 
         <div class="card hidden" id="http-console-card">
@@ -780,6 +820,17 @@ Accept: text/html,application/xhtml+xml</textarea>
 
         </div>
 
+        <div class="card hidden" id="terminal-card">
+            <h2>🖥️ 远程终端</h2>
+            <div class="toolbar-note">独享一个持久 shell 会话；断开重连不会重置，自动回放历史输出。点击后在<b>浮动窗口</b>中打开，提供更大显示空间（可拖动、缩放、最大化）。</div>
+            <div class="compact-toolbar" style="margin-bottom:10px;">
+                <div class="toolbar-actions">
+                    <button class="btn btn-primary" id="term-open-btn" onclick="openTerminal()">打开终端</button>
+                    <span id="term-card-status" style="margin-left:10px;color:#666;"></span>
+                </div>
+            </div>
+        </div>
+
         <div class="card" id="logs-card">
             <details>
                 <summary>📜 日志</summary>
@@ -849,6 +900,43 @@ Accept: text/html,application/xhtml+xml</textarea>
         </div>
     </div>
 
-    <script src="controller.js?v=3"></script>
+    <!-- 远程终端浮动窗口（大显示空间，可拖动/缩放/最大化） -->
+    <style>
+        .terminal-float {
+            position: fixed; z-index: 9999;
+            top: 5vh; left: 4vw; width: 92vw; height: 88vh;
+            min-width: 360px; min-height: 220px;
+            background: #1e1e1e; border: 1px solid #444; border-radius: 10px;
+            box-shadow: 0 14px 48px rgba(0,0,0,.55);
+            display: flex; flex-direction: column; overflow: hidden; resize: both;
+        }
+        .terminal-float.hidden { display: none; }
+        .terminal-float.maximized { top:0 !important; left:0 !important; width:100vw !important; height:100vh !important; border-radius:0; resize:none; }
+        .terminal-float-titlebar {
+            display:flex; align-items:center; gap:8px;
+            padding:8px 12px; background:#2d2d2d; color:#ddd; cursor:move; user-select:none;
+        }
+        .terminal-float-title { font-weight:600; }
+        .terminal-float-status { color:#79a6d2; font-size:12px; }
+        .terminal-float-spacer { flex:1; }
+        .tf-btn { background:#3a3a3a; color:#eee; border:1px solid #555; border-radius:6px; padding:4px 11px; cursor:pointer; font-size:13px; line-height:1.4; }
+        .tf-btn:hover { background:#4a4a4a; }
+        .tf-btn.tf-danger:hover { background:#c0392b; border-color:#c0392b; }
+        .tf-btn.tf-close:hover { background:#c0392b; border-color:#c0392b; }
+        .terminal-float-host { flex:1; min-height:0; padding:6px; background:#1e1e1e; overflow:hidden; }
+    </style>
+    <div id="terminal-float" class="terminal-float hidden">
+        <div class="terminal-float-titlebar" id="terminal-float-titlebar">
+            <span class="terminal-float-title">🖥️ 远程终端</span>
+            <span id="term-status" class="terminal-float-status"></span>
+            <span class="terminal-float-spacer"></span>
+            <button class="tf-btn tf-danger" id="term-kill-btn" onclick="killTerminal()" title="结束远端 shell 会话">结束会话</button>
+            <button class="tf-btn" id="term-maximize-btn" onclick="toggleTerminalMaximize()" title="最大化 / 还原">⤢ 最大化</button>
+            <button class="tf-btn tf-close" onclick="closeTerminalWindow()" title="关闭窗口（不结束会话，可重新打开）">✕</button>
+        </div>
+        <div id="terminal-host" class="terminal-float-host"></div>
+    </div>
+
+    <script src="controller.js?v=20260608171624"></script>
 </body>
 </html>

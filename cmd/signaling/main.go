@@ -70,6 +70,8 @@ type Server struct {
 	mu                   sync.RWMutex
 	agents               map[string]*AgentInfo
 	tokens               map[string]string
+
+	turn TURNConfig // 内嵌 TURN 中转配置（含临时凭据签发参数）
 }
 
 func NewServer(addr, authToken, webDir string, store *DataStore, emailVerifyEnabled, emailVerifyRequired bool, sessionTTL time.Duration, smtpHost string, smtpPort int, smtpUser, smtpPass, smtpFrom string) *Server {
@@ -102,6 +104,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/auth/login", s.withCORS(s.handleAuthLogin))
 	mux.HandleFunc("/auth/me", s.withCORS(s.handleAuthMe))
 	mux.HandleFunc("/auth/change-password", s.withCORS(s.handleAuthChangePassword))
+	mux.HandleFunc("/agent/turn-credentials", s.withCORS(s.handleAgentTurnCredentials))
+	mux.HandleFunc("/me/quota", s.withCORS(s.handleMyQuota))
+	mux.HandleFunc("/admin/users", s.withCORS(s.handleAdminUsers))
+	mux.HandleFunc("/admin/users/quota", s.withCORS(s.handleAdminSetQuota))
+	mux.HandleFunc("/admin/users/reset-usage", s.withCORS(s.handleAdminResetUsage))
 	mux.HandleFunc("/controller/list", s.withCORS(s.handleControllerList))
 	mux.HandleFunc("/controller/agent/delete", s.withCORS(s.handleControllerAgentDelete))
 	mux.HandleFunc("/controller/agents/register", s.withCORS(s.handleControllerAgentRegister))
@@ -200,6 +207,13 @@ func (s *Server) handleStaticFiles(w http.ResponseWriter, r *http.Request) {
 		path = "/index.html"
 	}
 	path = strings.TrimPrefix(path, "/")
+	// 缓存策略：vendor/（xterm 等第三方，极少变）可长缓存；
+	// 应用文件（index.html / controller.js / css）强制每次重验证，避免改了前端浏览器仍用旧缓存。
+	if strings.HasPrefix(path, "vendor/") {
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	}
 	if s.webDir != "" {
 		filePath := filepath.Join(s.webDir, path)
 		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
@@ -348,6 +362,172 @@ func (s *Server) requireUser(r *http.Request) (*UserSession, *UserRecord, error)
 		return nil, nil, fmt.Errorf("invalid session")
 	}
 	return session, user, nil
+}
+
+// requireAdmin 在 requireUser 基础上要求 IsAdmin。
+func (s *Server) requireAdmin(r *http.Request) (*UserSession, *UserRecord, error) {
+	session, user, err := s.requireUser(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !user.IsAdmin {
+		return nil, nil, fmt.Errorf("admin role required")
+	}
+	return session, user, nil
+}
+
+// adminConfigFile 是 -admin-config 的 JSON 结构。
+type adminConfigFile struct {
+	Admins []string `json:"admins"`
+}
+
+// loadAdminConfig 读取管理员配置文件，返回 admin 键列表（"user" 或 "tenant:user"）。
+func loadAdminConfig(path string) ([]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg adminConfigFile
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("parse admin config failed: %w", err)
+	}
+	return cfg.Admins, nil
+}
+
+// handleMyQuota GET /me/quota —— 普通登录用户查看自己的中转额度与本月用量。
+func (s *Server) handleMyQuota(w http.ResponseWriter, r *http.Request) {
+	_, user, err := s.requireUser(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	q := s.dataStore.UserQuota(user.ID)
+	writeJSON(w, map[string]interface{}{
+		"turn_enabled":        s.turn.Enabled,
+		"max_bps":             q.MaxBps,
+		"monthly_quota_bytes": q.MonthlyQuotaBytes,
+		"used_bytes":          q.UsedBytes,
+		"quota_month":         currentMonth(),
+		"exhausted":           q.Exhausted,
+	}, http.StatusOK)
+}
+
+// handleAdminUsers GET /admin/users —— 列出本租户用户及其额度/用量。
+func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	_, user, err := s.requireAdmin(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	users := s.dataStore.ListUsers(user.TenantCode)
+	list := make([]map[string]interface{}, 0, len(users))
+	for _, u := range users {
+		q := s.dataStore.UserQuota(u.ID)
+		list = append(list, map[string]interface{}{
+			"user_id":             u.ID,
+			"username":            u.Username,
+			"email":               u.Email,
+			"is_admin":            u.IsAdmin,
+			"max_bps":             u.MaxBps,
+			"monthly_quota_bytes": u.MonthlyQuotaBytes,
+			"used_bytes":          q.UsedBytes,
+			"quota_month":         currentMonth(),
+			"exhausted":           q.Exhausted,
+		})
+	}
+	writeJSON(w, map[string]interface{}{"users": list, "turn_enabled": s.turn.Enabled}, http.StatusOK)
+}
+
+// handleAdminSetQuota POST /admin/users/quota {user_id, max_bps, monthly_quota_bytes}
+func (s *Server) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
+	_, admin, err := s.requireAdmin(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	var req struct {
+		UserID            string `json:"user_id"`
+		MaxBps            int64  `json:"max_bps"`
+		MonthlyQuotaBytes int64  `json:"monthly_quota_bytes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	target := s.dataStore.GetUserByID(req.UserID)
+	if target == nil || target.TenantCode != admin.TenantCode {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if err := s.dataStore.SetUserQuota(req.UserID, req.MaxBps, req.MonthlyQuotaBytes); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"success": true}, http.StatusOK)
+}
+
+// handleAdminResetUsage POST /admin/users/reset-usage {user_id}
+func (s *Server) handleAdminResetUsage(w http.ResponseWriter, r *http.Request) {
+	_, admin, err := s.requireAdmin(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	target := s.dataStore.GetUserByID(req.UserID)
+	if target == nil || target.TenantCode != admin.TenantCode {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if err := s.dataStore.ResetUserUsage(req.UserID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"success": true}, http.StatusOK)
+}
+
+// handleAgentTurnCredentials —— agent 用其 token 拉取内嵌 TURN 临时凭据（归属到 owner 用户）。
+func (s *Server) handleAgentTurnCredentials(w http.ResponseWriter, r *http.Request) {
+	token := r.Header.Get("Authorization")
+	if token == "" {
+		http.Error(w, "Missing authorization", http.StatusUnauthorized)
+		return
+	}
+	s.mu.RLock()
+	agentID, ok := s.tokens[token]
+	var ownerID string
+	if ok {
+		if agent := s.agents[agentID]; agent != nil {
+			ownerID = agent.OwnerUserID
+		}
+	}
+	s.mu.RUnlock()
+	if !ok {
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+	if !s.turn.Enabled {
+		writeJSON(w, map[string]interface{}{"turn_enabled": false}, http.StatusOK)
+		return
+	}
+	username, credential, urls, issued := s.issueTURNCredentials(ownerID)
+	if !issued {
+		writeJSON(w, map[string]interface{}{"turn_enabled": false}, http.StatusOK)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"turn_enabled": true,
+		"urls":         urls,
+		"username":     username,
+		"credential":   credential,
+		"ttl_seconds":  int(s.turn.TTL.Seconds()),
+	}, http.StatusOK)
 }
 
 func (s *Server) sendVerificationEmail(email, code string) error {
@@ -502,6 +682,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		"tenant_code":  user.TenantCode,
 		"username":     user.Username,
 		"email":        user.Email,
+		"is_admin":     user.IsAdmin,
 		"expires_at":   session.ExpiresAt,
 	}, http.StatusOK)
 }
@@ -519,6 +700,7 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		"username":       user.Username,
 		"email":          user.Email,
 		"email_verified": user.EmailVerified,
+		"is_admin":       user.IsAdmin,
 		"expires_at":     session.ExpiresAt,
 	}, http.StatusOK)
 }
@@ -796,10 +978,12 @@ func (s *Server) handleOwnedAgentList(w http.ResponseWriter, r *http.Request) {
 			"display_name": record.DisplayName,
 			"description":  record.Description,
 			"ice_servers":  func() []protocol.ICEServerInfo {
-				if agent == nil {
-					return nil
+				var base []protocol.ICEServerInfo
+				if agent != nil {
+					base = agent.ICEServers
 				}
-				return agent.ICEServers
+				// 注入内嵌 TURN（带当前用户临时凭据），让直连失败时可回退中转。
+				return s.iceServersForUser(user.ID, base)
 			}(),
 			"online":       online,
 			"connected":    connected,
@@ -1199,6 +1383,14 @@ func main() {
 		smtpUser             = flag.String("smtp-user", "", "SMTP username")
 		smtpPass             = flag.String("smtp-pass", "", "SMTP password")
 		smtpFrom             = flag.String("smtp-from", "", "SMTP from address")
+		adminConfig          = flag.String("admin-config", "", "Admin config JSON file ({\"admins\":[\"user\",\"tenant:user\"]}); listed users become admins")
+		turnEnabled          = flag.Bool("turn-enabled", false, "Enable embedded TURN relay server")
+		turnPublicIP         = flag.String("turn-public-ip", "", "TURN relay public IP (client-reachable); required when -turn-enabled")
+		turnPort             = flag.Int("turn-port", 3478, "TURN server listen port (udp+tcp)")
+		turnListen           = flag.String("turn-listen", "0.0.0.0", "TURN server bind address")
+		turnRealm            = flag.String("turn-realm", "webrtc-portmap", "TURN realm")
+		turnSecret           = flag.String("turn-secret", "", "TURN REST shared secret (auto-generated if empty)")
+		turnTTL              = flag.Duration("turn-ttl", 12*time.Hour, "TURN ephemeral credential TTL")
 	)
 	flag.Parse()
 
@@ -1207,8 +1399,46 @@ func main() {
 		fmt.Printf("[Signaling] Failed to open data store: %v\n", err)
 		os.Exit(1)
 	}
+
+	// 应用管理员配置：把配置文件列出的用户标记为 admin（其余清除 admin）。
+	if *adminConfig != "" {
+		admins, err := loadAdminConfig(*adminConfig)
+		if err != nil {
+			fmt.Printf("[Signaling] Failed to load admin config: %v\n", err)
+			os.Exit(1)
+		}
+		matched := store.ApplyAdmins(admins, defaultTenantCode)
+		fmt.Printf("[Signaling] Admin config: %d configured, %d matched existing users: %v\n", len(admins), len(matched), matched)
+	}
+
 	server := NewServer(*addr, *authToken, *webDir, store, *emailVerifyEnabled, *emailVerifyRequired, *sessionTTL, *smtpHost, *smtpPort, *smtpUser, *smtpPass, *smtpFrom)
 	go server.cleanupLoop()
+
+	// 内嵌 TURN 中转服务（可选）。
+	if *turnEnabled {
+		secret := strings.TrimSpace(*turnSecret)
+		if secret == "" {
+			secret = randomHex(24)
+			fmt.Printf("[Signaling] TURN secret auto-generated (set -turn-secret to persist across restarts)\n")
+		}
+		server.turn = TURNConfig{
+			Enabled:    true,
+			PublicIP:   *turnPublicIP,
+			ListenAddr: *turnListen,
+			Port:       *turnPort,
+			Realm:      *turnRealm,
+			Secret:     secret,
+			TTL:        *turnTTL,
+		}
+		turnSvc, err := startTURNServer(store, server.turn)
+		if err != nil {
+			fmt.Printf("[Signaling] TURN server failed to start: %v\n", err)
+			os.Exit(1)
+		}
+		defer turnSvc.Close()
+	} else {
+		fmt.Printf("[Signaling] Embedded TURN: disabled (use -turn-enabled -turn-public-ip <IP> to enable relay)\n")
+	}
 
 	fmt.Printf("[Signaling] Starting on http://%s\n", *addr)
 	if *authToken != "" {

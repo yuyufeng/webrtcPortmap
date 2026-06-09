@@ -13,9 +13,35 @@ set GOARCH=amd64
 
 if not exist %BUILD_DIR% mkdir %BUILD_DIR%
 
+echo [0/9] Syncing Go modules (go mod tidy)...
+go mod tidy
+if %errorlevel% neq 0 (
+    echo [ERROR] go mod tidy failed
+    exit /b 1
+)
+echo [OK] modules synced
+echo.
+
+echo [0b/9] Vendoring xterm.js front-end assets...
+call "%~dp0fetch-xterm.bat"
+if %errorlevel% neq 0 (
+    echo [WARN] xterm vendoring failed ^(no network?^). Web terminal UI may not load until fetch-xterm.bat succeeds.
+)
+echo.
+
+echo [0c/9] Bumping web cache-bust token (forces browsers to reload controller.js)...
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMddHHmmss"') do set CACHEBUST=%%i
+powershell -NoProfile -Command "$f='%~dp0cmd\signaling\web\static\index.html'; $c=[IO.File]::ReadAllText($f); $c=[regex]::Replace($c,'controller\.js\?v=[0-9A-Za-z]+','controller.js?v=%CACHEBUST%'); [IO.File]::WriteAllText($f,$c,[Text.UTF8Encoding]::new($false))"
+if %errorlevel% neq 0 (
+    echo [WARN] cache-bust bump failed; browser may serve cached controller.js. Hard-refresh ^(Ctrl-F5^) if web looks stale.
+) else (
+    echo [OK] controller.js?v=%CACHEBUST%
+)
+echo.
+
 echo [1/9] Building signaling server for Windows...
 set GOOS=windows
-go build -ldflags="-s -w" -o %BUILD_DIR%\signaling.exe .\cmd\signaling
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\signaling.exe .\cmd\signaling
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build signaling server for Windows
     exit /b 1
@@ -24,7 +50,7 @@ echo [OK] signaling.exe built successfully
 echo.
 
 echo [2/9] Building agent for Windows...
-go build -ldflags="-s -w" -o %BUILD_DIR%\agent.exe .\cmd\agent
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\agent.exe .\cmd\agent
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build agent for Windows
     exit /b 1
@@ -33,7 +59,7 @@ echo [OK] agent.exe built successfully
 echo.
 
 echo [3/9] Building client for Windows...
-go build -ldflags="-s -w" -o %BUILD_DIR%\client.exe .\cmd\client
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\client.exe .\cmd\client
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build client for Windows
     exit /b 1
@@ -43,7 +69,7 @@ echo.
 
 echo [4/9] Building signaling server for Linux...
 set GOOS=linux
-go build -ldflags="-s -w" -o %BUILD_DIR%\signaling-linux-amd64 .\cmd\signaling
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\signaling-linux-amd64 .\cmd\signaling
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build signaling server for Linux
     exit /b 1
@@ -52,7 +78,7 @@ echo [OK] signaling-linux-amd64 built successfully
 echo.
 
 echo [5/9] Building agent for Linux...
-go build -ldflags="-s -w" -o %BUILD_DIR%\agent-linux-amd64 .\cmd\agent
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\agent-linux-amd64 .\cmd\agent
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build agent for Linux
     exit /b 1
@@ -61,7 +87,7 @@ echo [OK] agent-linux-amd64 built successfully
 echo.
 
 echo [6/9] Building client for Linux...
-go build -ldflags="-s -w" -o %BUILD_DIR%\client-linux-amd64 .\cmd\client
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\client-linux-amd64 .\cmd\client
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build client for Linux
     exit /b 1
@@ -71,7 +97,7 @@ echo.
 
 echo [7/9] Building signaling server for macOS...
 set GOOS=darwin
-go build -ldflags="-s -w" -o %BUILD_DIR%\signaling-darwin-amd64 .\cmd\signaling
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\signaling-darwin-amd64 .\cmd\signaling
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build signaling server for macOS
     exit /b 1
@@ -80,7 +106,7 @@ echo [OK] signaling-darwin-amd64 built successfully
 echo.
 
 echo [8/9] Building agent for macOS...
-go build -ldflags="-s -w" -o %BUILD_DIR%\agent-darwin-amd64 .\cmd\agent
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\agent-darwin-amd64 .\cmd\agent
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build agent for macOS
     exit /b 1
@@ -89,7 +115,7 @@ echo [OK] agent-darwin-amd64 built successfully
 echo.
 
 echo [9/9] Building client for macOS...
-go build -ldflags="-s -w" -o %BUILD_DIR%\client-darwin-amd64 .\cmd\client
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\client-darwin-amd64 .\cmd\client
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to build client for macOS
     exit /b 1

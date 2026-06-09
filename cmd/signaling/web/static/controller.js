@@ -22,7 +22,13 @@ const state = {
     previewHistoryIndex: -1,
     selectedAgentName: '',
     selectedAgent: null,
-    agentsById: {}
+    agentsById: {},
+    // 内嵌终端
+    term: null,        // xterm.js 实例
+    termFit: null,     // fit addon
+    termOpen: false,   // 是否已打开/附着终端会话
+    termDataDisposable: null,
+    termResizeHandler: null
 };
 
 const DEFAULT_TENANT_CODE = 'convnet';
@@ -146,6 +152,8 @@ function updateCurrentUserUI() {
     const text = state.currentUser
         ? `当前用户：${state.currentUser.username}${state.currentUser.email ? ` (${state.currentUser.email})` : ''}`
         : '';
+    updateAdminVisibility();
+    updateMyQuotaVisibility();
     const currentUser = document.getElementById('current-user');
     const agentListUser = document.getElementById('agent-list-user');
     const userHash = document.getElementById('user-hash');
@@ -180,7 +188,9 @@ function updateCurrentUserUI() {
         setDownloadLink(clientDownloadURLLinux, `${signalURL}/download/client/linux`);
     }
     if (agentStartCommand) {
-        agentStartCommand.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL}`;
+        agentStartCommand.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -terminal\n`
+            + `# -terminal 启用内嵌远程终端（断线重连自动回放，不重置）；可选 -terminal-shell powershell|cmd|bash|sh\n`
+            + `# 直连失败会自动经服务器 TURN 中转（-use-server-turn 默认开）`;
     }
     if (agentPortsJSON) {
         agentPortsJSON.value = JSON.stringify({
@@ -210,7 +220,8 @@ function updateCurrentUserUI() {
         }, null, 2);
     }
     if (agentStartCommandWithPorts) {
-        agentStartCommandWithPorts.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -ports ./ports.json`;
+        agentStartCommandWithPorts.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -ports ./ports.json -terminal\n`
+            + `# -terminal 启用内嵌远程终端；-ports 指定端口映射配置；直连失败自动经服务器 TURN 中转`;
     }
     if (clientStartCommand) {
         clientStartCommand.value = `client -signal ${signalURL} -username ${state.currentUser?.username || '<username>'} -user-password <password>\n# 默认进入交互模式：选择 Agent、输入本地密码、选择服务并指定本地端口`;
@@ -326,6 +337,146 @@ async function loginUser() {
     } catch (err) {
         log(`登录失败: ${err.message}`, 'error');
         showStatus('login-status', `登录失败: ${err.message}`, 'error');
+    }
+}
+
+// ==================== 普通用户：我的中转额度 ====================
+
+// updateMyQuotaVisibility 对所有登录用户显示「我的中转额度」卡片并加载。
+function updateMyQuotaVisibility() {
+    const loggedIn = !!(state.userSessionToken && state.currentUser);
+    const card = document.getElementById('my-quota-card');
+    if (!card) return;
+    card.classList.toggle('hidden', !loggedIn);
+    if (loggedIn) loadMyQuota();
+}
+
+async function loadMyQuota() {
+    if (!state.userSessionToken) return;
+    try {
+        const resp = await fetch(`${getSignalURL()}/me/quota`, { headers: buildJSONHeaders(true) });
+        if (!resp.ok) return;
+        renderMyQuota(await resp.json());
+    } catch (err) { /* 忽略 */ }
+}
+
+function renderMyQuota(d) {
+    const body = document.getElementById('my-quota-body');
+    if (!body) return;
+    if (!d || !d.turn_enabled) {
+        body.textContent = '内嵌 TURN 中转未启用，当前不产生中转流量（直连/P2P 不计额度）。';
+        return;
+    }
+    const used = formatBytesHuman(d.used_bytes);
+    const hasCap = d.monthly_quota_bytes > 0;
+    const cap = hasCap ? formatBytesHuman(d.monthly_quota_bytes) : '不限';
+    const pct = hasCap ? Math.min(100, Math.round((d.used_bytes / d.monthly_quota_bytes) * 100)) : 0;
+    const speed = d.max_bps ? (bytesPerSecToMbps(d.max_bps).toFixed(2) + ' Mbps') : '不限';
+    const exhausted = d.exhausted ? ' <span style="color:#c00;">（本月额度已用满，中转暂停）</span>' : '';
+    const bar = hasCap
+        ? `<div style="background:#eee;border-radius:6px;height:10px;margin:6px 0;overflow:hidden;"><div style="height:100%;width:${pct}%;background:${pct >= 100 ? '#c00' : '#4caf50'};"></div></div>`
+        : '';
+    body.innerHTML = `本月已用：<b>${used}</b> / ${cap}（${d.quota_month}）${exhausted}${bar}每会话限速：<b>${speed}</b>`;
+}
+
+// ==================== 管理员：用户管理 ====================
+
+const ADMIN_BYTES_PER_GB = 1024 * 1024 * 1024;
+function gbToBytes(gb) { return Math.round((parseFloat(gb) || 0) * ADMIN_BYTES_PER_GB); }
+function bytesToGB(b) { return (b || 0) / ADMIN_BYTES_PER_GB; }
+function mbpsToBytesPerSec(mbps) { return Math.round((parseFloat(mbps) || 0) * 1000000 / 8); }
+function bytesPerSecToMbps(bps) { return (bps || 0) * 8 / 1000000; }
+function formatBytesHuman(b) {
+    b = b || 0;
+    if (b < 1024) return b + ' B';
+    const u = ['KB', 'MB', 'GB', 'TB'];
+    let n = b / 1024, i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(2) + ' ' + u[i];
+}
+
+// updateAdminVisibility 仅对管理员显示「用户管理」面板，并按需加载数据。
+function updateAdminVisibility() {
+    const isAdmin = !!state.currentUser?.is_admin;
+    const card = document.getElementById('admin-user-mgmt-card');
+    if (!card) return;
+    card.classList.toggle('hidden', !isAdmin);
+    if (isAdmin) loadAdminUsers();
+}
+
+async function loadAdminUsers() {
+    if (!state.currentUser?.is_admin) return;
+    try {
+        const resp = await fetch(`${getSignalURL()}/admin/users`, { headers: buildJSONHeaders(true) });
+        if (!resp.ok) { log(`加载用户列表失败: ${resp.status}`, 'error'); return; }
+        const data = await resp.json();
+        const note = document.getElementById('admin-turn-note');
+        if (note) {
+            note.textContent = data.turn_enabled
+                ? '内嵌 TURN 中转：已启用，额度将实际生效。'
+                : '⚠️ 内嵌 TURN 未启用（启动加 -turn-enabled -turn-public-ip）。额度可设置但暂不会产生中转流量。';
+        }
+        renderAdminUsers(data.users || []);
+    } catch (err) {
+        log(`加载用户列表失败: ${err.message}`, 'error');
+    }
+}
+
+function renderAdminUsers(users) {
+    const tb = document.getElementById('admin-users-tbody');
+    if (!tb) return;
+    const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    if (!users.length) { tb.innerHTML = '<tr><td colspan="6" style="padding:8px;color:#888;">暂无用户</td></tr>'; return; }
+    tb.innerHTML = users.map(u => {
+        const gb = u.monthly_quota_bytes ? bytesToGB(u.monthly_quota_bytes).toFixed(2) : '0';
+        const mbps = u.max_bps ? bytesPerSecToMbps(u.max_bps).toFixed(2) : '0';
+        const used = formatBytesHuman(u.used_bytes);
+        const exhausted = u.exhausted ? ' <span style="color:#c00;">(已用满)</span>' : '';
+        const adminTag = u.is_admin ? ' 👑' : '';
+        const id = esc(u.user_id);
+        return `<tr style="border-bottom:1px solid #eee;">
+            <td style="padding:6px;">${esc(u.username)}${adminTag}</td>
+            <td style="padding:6px;">${esc(u.email)}</td>
+            <td style="padding:6px;">${used}${exhausted}</td>
+            <td style="padding:6px;"><input type="number" min="0" step="0.1" value="${gb}" id="q-gb-${id}" style="width:90px;"></td>
+            <td style="padding:6px;"><input type="number" min="0" step="0.1" value="${mbps}" id="q-mbps-${id}" style="width:90px;"></td>
+            <td style="padding:6px;white-space:nowrap;">
+                <button class="btn btn-secondary" onclick="saveUserQuota('${id}')">保存</button>
+                <button class="btn btn-secondary" onclick="resetUserUsage('${id}')">清零用量</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function saveUserQuota(userId) {
+    const gb = document.getElementById(`q-gb-${userId}`)?.value;
+    const mbps = document.getElementById(`q-mbps-${userId}`)?.value;
+    try {
+        const resp = await fetch(`${getSignalURL()}/admin/users/quota`, {
+            method: 'POST',
+            headers: buildJSONHeaders(true),
+            body: JSON.stringify({ user_id: userId, monthly_quota_bytes: gbToBytes(gb), max_bps: mbpsToBytesPerSec(mbps) })
+        });
+        if (!resp.ok) { log(`保存额度失败: ${await resp.text()}`, 'error'); return; }
+        log('额度已保存');
+        loadAdminUsers();
+    } catch (err) {
+        log(`保存额度失败: ${err.message}`, 'error');
+    }
+}
+
+async function resetUserUsage(userId) {
+    try {
+        const resp = await fetch(`${getSignalURL()}/admin/users/reset-usage`, {
+            method: 'POST',
+            headers: buildJSONHeaders(true),
+            body: JSON.stringify({ user_id: userId })
+        });
+        if (!resp.ok) { log(`清零失败: ${await resp.text()}`, 'error'); return; }
+        log('用量已清零');
+        loadAdminUsers();
+    } catch (err) {
+        log(`清零失败: ${err.message}`, 'error');
     }
 }
 
@@ -545,7 +696,13 @@ async function deleteAgent(id, displayName) {
 
 // ==================== WebRTC连接 ====================
 async function connect() {
+    // 去重守卫：握手未完成前忽略重复点击，避免发出第二个 offer 把已建立的会话拆掉。
+    if (state.connecting) {
+        log('正在连接中，请勿重复点击');
+        return;
+    }
     resetConnectionState();
+    state.connecting = true;
 
     state.signalURL = window.location.origin;
     state.webConsoleBase = `${window.location.origin}/webconsole`; 
@@ -584,6 +741,7 @@ async function connect() {
         showStatus('password-status', 'WebRTC连接建立中...', 'info');
         
     } catch (err) {
+        state.connecting = false;
         log(`连接失败: ${err.message}`, 'error');
         showStatus('password-status', `连接失败: ${err.message}`, 'error');
     }
@@ -632,9 +790,13 @@ async function createPeerConnection() {
         log(`使用 Agent 提供的 ICE 配置 (${iceServers.length})`);
     }
     const config = { iceServers };
-    
+
     state.pc = new RTCPeerConnection(config);
-    
+    // 远端描述就绪前到达的候选先缓冲，待 setRemoteDescription 后再灌入，
+    // 否则较晚到达的 relay 候选会被 addIceCandidate 直接拒绝，导致无法回退到 TURN 中转。
+    state.remoteDescSet = false;
+    state.pendingRemoteCandidates = [];
+
     state.pc.onicecandidate = (event) => {
         if (event.candidate) {
             fetch(`${getSignalURL()}/controller/send?agent_id=${state.agentID}`, {
@@ -649,7 +811,11 @@ async function createPeerConnection() {
         log(`连接状态: ${state.pc.connectionState}`);
         if (state.pc.connectionState === 'connected') {
             showStatus('password-status', 'WebRTC已连接，等待鉴权...', 'success');
-        } else if (state.pc.connectionState === 'failed' || state.pc.connectionState === 'disconnected') {
+        } else if (state.pc.connectionState === 'disconnected') {
+            // disconnected 是可恢复的瞬态（relay 切换/短暂丢包都会经过它），
+            // 不立刻拆连接，给 ICE 自愈或回退到 TURN 中转的机会；真失败会进入 failed。
+            showStatus('password-status', 'WebRTC连接中断，尝试恢复中...', 'error');
+        } else if (state.pc.connectionState === 'failed' || state.pc.connectionState === 'closed') {
             showStatus('password-status', 'WebRTC连接断开', 'error');
             disconnect();
         }
@@ -708,8 +874,25 @@ async function startSignalingPoll() {
                 const msg = await response.json();
                 if (msg.type === 'answer' && msg.sdp) {
                     await state.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                    state.remoteDescSet = true;
+                    // 灌入此前缓冲的候选（含较晚到达的 relay 候选）。
+                    const pending = state.pendingRemoteCandidates || [];
+                    state.pendingRemoteCandidates = [];
+                    for (const cand of pending) {
+                        try {
+                            await state.pc.addIceCandidate(new RTCIceCandidate(cand));
+                        } catch (e) {
+                            log(`灌入缓冲ICE候选失败: ${e.message}`, 'error');
+                        }
+                    }
+                    if (pending.length > 0) log(`已灌入 ${pending.length} 个缓冲ICE候选`);
                 } else if (msg.type === 'candidate' && msg.candidate) {
-                    await state.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                    if (!state.remoteDescSet) {
+                        // 远端描述尚未就绪，先缓冲。
+                        (state.pendingRemoteCandidates = state.pendingRemoteCandidates || []).push(msg.candidate);
+                    } else {
+                        await state.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                    }
                 }
             }
         } catch (err) {}
@@ -780,6 +963,7 @@ async function handleDataChannelMessage(data) {
                 });
                 
                 state.authenticated = true;
+                state.connecting = false;
                 log('鉴权成功！');
                 showStatus('password-status', '已连接并鉴权成功', 'success');
                 document.body.classList.add('connected-mode');
@@ -799,6 +983,7 @@ async function handleDataChannelMessage(data) {
                 log(`Agent有 ${msg.payload.ports.length} 个端口配置`);
                 renderPortButtons(msg.payload.ports);
             }
+            applyTerminalCapability(msg.payload && msg.payload.terminal);
         } else if (msg.type === 18) { // MsgTypeHTTPResponse
             handleHTTPResponse(msg.payload);
         } else if (msg.type === 20) { // MsgTypeWSOpenAck
@@ -809,6 +994,10 @@ async function handleDataChannelMessage(data) {
             handleWSClose(msg.payload);
         } else if (msg.type === 23) { // MsgTypeWSError
             handleWSError(msg.payload);
+        } else if (msg.type === 25) { // MsgTypeTermData
+            handleTermData(msg.payload);
+        } else if (msg.type === 28) { // MsgTypeTermExit
+            handleTermExit(msg.payload);
         }
     } catch (err) {
         log(`处理消息失败: ${err.message}`, 'error');
@@ -967,6 +1156,7 @@ async function sendHTTPRequest() {
 }
 
 function resetConnectionState() {
+    state.connecting = false;
     if (state.dataChannel) {
         try { state.dataChannel.close(); } catch (e) {}
     }
@@ -2252,6 +2442,192 @@ window.__dcCreateWebSocket = function(portID, url, protocols, currentPath) {
     return new DcWebSocket(portID, url, protocols, currentPath);
 };
 
+// ==================== 内嵌终端（浮动窗口） ====================
+function setTermStatus(text) {
+    const st = document.getElementById('term-status');
+    if (st) st.textContent = text;
+    const cardSt = document.getElementById('term-card-status');
+    if (cardSt) cardSt.textContent = text;
+}
+
+// showTerminalWindow 显示终端浮动窗口（必要时初始化拖动与尺寸自适应）。
+function showTerminalWindow() {
+    const win = document.getElementById('terminal-float');
+    if (!win) return;
+    win.classList.remove('hidden');
+    setupTerminalFloat();
+    // 显示后下一帧再 fit，确保容器已有真实尺寸
+    requestAnimationFrame(() => fitTerminal());
+}
+
+// closeTerminalWindow 关闭浮动窗口（仅隐藏，不结束远端会话，可重新打开）。
+function closeTerminalWindow() {
+    document.getElementById('terminal-float')?.classList.add('hidden');
+}
+
+// toggleTerminalMaximize 在大窗口与全屏之间切换。
+function toggleTerminalMaximize() {
+    const win = document.getElementById('terminal-float');
+    if (!win) return;
+    const maxed = win.classList.toggle('maximized');
+    const btn = document.getElementById('term-maximize-btn');
+    if (btn) btn.textContent = maxed ? '⤡ 还原' : '⤢ 最大化';
+    requestAnimationFrame(() => fitTerminal());
+}
+
+// fitTerminal 重新计算 xterm 行列以填满当前窗口并上报 resize。
+function fitTerminal() {
+    if (state.termFit) { try { state.termFit.fit(); } catch (e) {} }
+    sendTermResize();
+}
+
+// setupTerminalFloat 初始化标题栏拖动与窗口尺寸变化自适应（仅一次）。
+function setupTerminalFloat() {
+    const win = document.getElementById('terminal-float');
+    if (!win || win.dataset.floatReady) return;
+    win.dataset.floatReady = '1';
+
+    // 拖动：按住标题栏移动窗口（最大化时禁用）。
+    const bar = document.getElementById('terminal-float-titlebar');
+    if (bar) {
+        let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+        bar.addEventListener('mousedown', (e) => {
+            if (e.target.closest('button') || win.classList.contains('maximized')) return;
+            dragging = true;
+            const rect = win.getBoundingClientRect();
+            ox = rect.left; oy = rect.top; sx = e.clientX; sy = e.clientY;
+            win.style.right = 'auto'; win.style.bottom = 'auto';
+            e.preventDefault();
+        });
+        window.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            let nx = ox + (e.clientX - sx), ny = oy + (e.clientY - sy);
+            nx = Math.max(0, Math.min(nx, window.innerWidth - 80));
+            ny = Math.max(0, Math.min(ny, window.innerHeight - 40));
+            win.style.left = nx + 'px'; win.style.top = ny + 'px';
+        });
+        window.addEventListener('mouseup', () => { dragging = false; });
+    }
+
+    // 窗口（CSS resize 手柄 / 最大化）尺寸变化时自动 fit。
+    if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(() => fitTerminal());
+        ro.observe(win);
+    }
+}
+
+// 根据 Agent 上报的能力显示/隐藏终端卡片；断线重连后自动重新附着（触发回放）。
+function applyTerminalCapability(termInfo) {
+    const card = document.getElementById('terminal-card');
+    if (!card) return;
+    if (termInfo && termInfo.enabled) {
+        card.classList.remove('hidden');
+        setTermStatus('shell: ' + (termInfo.shell || 'default'));
+        if (state.termOpen) {
+            // 重连：自动重新附着并回放历史
+            openTerminal(true);
+        }
+    } else {
+        card.classList.add('hidden');
+    }
+}
+
+function ensureXterm() {
+    if (state.term) return state.term;
+    if (typeof Terminal === 'undefined') {
+        log('xterm.js 未加载（请确认能访问 CDN，或改为本地引入）', 'error');
+        setTermStatus('xterm.js 未加载');
+        return null;
+    }
+    const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'Consolas, "Courier New", monospace',
+        theme: { background: '#1e1e1e' },
+        scrollback: 5000
+    });
+    let fit = null;
+    try {
+        if (typeof FitAddon !== 'undefined' && FitAddon.FitAddon) {
+            fit = new FitAddon.FitAddon();
+            term.loadAddon(fit);
+        }
+    } catch (e) {}
+
+    const host = document.getElementById('terminal-host');
+    term.open(host);
+    if (fit) { try { fit.fit(); } catch (e) {} }
+
+    state.term = term;
+    state.termFit = fit;
+
+    // 键盘输入 -> Agent
+    state.termDataDisposable = term.onData((data) => sendTermInput(data));
+
+    // 浏览器窗口尺寸变化 -> 重新 fit 并上报 resize
+    state.termResizeHandler = () => fitTerminal();
+    window.addEventListener('resize', state.termResizeHandler);
+    return term;
+}
+
+function openTerminal(isReattach) {
+    if (!state.authenticated) { log('请先连接并鉴权', 'error'); return; }
+    showTerminalWindow();
+    const term = ensureXterm();
+    if (!term) return;
+    requestAnimationFrame(() => fitTerminal());
+    state.termOpen = true;
+    sendProtocolMessage({ type: 24, payload: { cols: term.cols || 80, rows: term.rows || 24 } }); // TermOpen
+    term.focus();
+    setTermStatus(isReattach ? '已重连，正在回放历史…' : '终端已连接');
+}
+
+function killTerminal() {
+    sendProtocolMessage({ type: 29, payload: {} }); // TermClose
+    state.termOpen = false;
+    if (state.term) {
+        state.term.reset();
+        state.term.write('\r\n[会话已结束]\r\n');
+    }
+    setTermStatus('会话已结束');
+}
+
+function sendTermInput(data) {
+    if (!state.termOpen) return;
+    const bytes = new TextEncoder().encode(data);
+    sendProtocolMessage({ type: 26, payload: { data: bytesToBase64(bytes) } }); // TermInput
+}
+
+function sendTermResize() {
+    if (!state.termOpen || !state.term) return;
+    sendProtocolMessage({ type: 27, payload: { cols: state.term.cols, rows: state.term.rows } }); // TermResize
+}
+
+function handleTermData(payload) {
+    if (!payload) return;
+    const term = ensureXterm();
+    if (!term) return;
+    const bytes = base64ToBytes(payload.data || '');
+    if (payload.replay) {
+        // 重连回放：先清屏，再写入历史快照，恢复到断线前的画面
+        term.reset();
+    }
+    term.write(bytes);
+}
+
+function handleTermExit(payload) {
+    const code = payload ? payload.code : 0;
+    const msg = (payload && payload.message) ? payload.message : 'shell exited';
+    if (state.term) state.term.write(`\r\n[终端退出 code=${code}] ${msg}\r\n`);
+    state.termOpen = false;
+    setTermStatus(`已退出 (code=${code})`);
+}
+
+window.openTerminal = openTerminal;
+window.killTerminal = killTerminal;
+window.closeTerminalWindow = closeTerminalWindow;
+window.toggleTerminalMaximize = toggleTerminalMaximize;
+
 // ==================== 断开连接 ====================
 function disconnect() {
     if (state.userSessionToken && state.agentID) {
@@ -2270,6 +2646,11 @@ function disconnect() {
     
     document.body.classList.remove('connected-mode');
     document.getElementById('http-console-card')?.classList.add('hidden');
+    // 隐藏终端卡片，但保留 xterm 实例与 termOpen 意图，
+    // 以便重新连接鉴权后自动重新附着并回放历史（断线不重置反馈）。
+    document.getElementById('terminal-card')?.classList.add('hidden');
+    closeTerminalWindow(); // 断开时收起浮动窗口（保留 termOpen 意图，重连自动恢复）
+    if (state.termOpen) setTermStatus('连接已断开，重连后自动恢复');
     closeConnectModal();
     if (state.userSessionToken) {
         document.getElementById('agent-register-card')?.classList.remove('hidden');

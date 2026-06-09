@@ -30,6 +30,13 @@ type Peer struct {
 	connected     bool
 	dataChanOpen  bool
 	candidateChan chan *webrtc.ICECandidate
+
+	// remoteSet 标记远端描述（offer/answer）是否已设置。
+	// 在它之前到达的远端 ICE 候选必须先缓冲，待远端描述就绪后再灌入，
+	// 否则 pion 的 AddICECandidate 会报错并丢弃——这会丢掉较晚到达的
+	// relay 候选，导致直连失败后无法回退到 TURN 中转。
+	remoteSet         bool
+	pendingCandidates []webrtc.ICECandidateInit
 }
 
 // NewPeer 创建新的Peer
@@ -154,6 +161,8 @@ func (p *Peer) CreateAnswer(offer *webrtc.SessionDescription) (*webrtc.SessionDe
 	if err := p.pc.SetRemoteDescription(*offer); err != nil {
 		return nil, fmt.Errorf("set remote description failed: %w", err)
 	}
+	// 远端描述已就绪，灌入此前缓冲的候选。
+	p.markRemoteSetAndFlush()
 
 	answer, err := p.pc.CreateAnswer(nil)
 	if err != nil {
@@ -177,12 +186,48 @@ func (p *Peer) CreateAnswer(offer *webrtc.SessionDescription) (*webrtc.SessionDe
 
 // SetRemoteDescription 设置远端描述
 func (p *Peer) SetRemoteDescription(desc *webrtc.SessionDescription) error {
-	return p.pc.SetRemoteDescription(*desc)
+	if err := p.pc.SetRemoteDescription(*desc); err != nil {
+		return err
+	}
+	// 远端描述已就绪，灌入此前缓冲的候选。
+	p.markRemoteSetAndFlush()
+	return nil
 }
 
-// AddICECandidate 添加ICE候选
+// AddICECandidate 添加ICE候选。
+// 若远端描述尚未设置，则先缓冲，待 SetRemoteDescription/CreateAnswer 后统一灌入，
+// 避免较晚到达的 relay 候选被 pion 直接丢弃。
 func (p *Peer) AddICECandidate(candidate *webrtc.ICECandidateInit) error {
+	p.mu.Lock()
+	if !p.remoteSet {
+		p.pendingCandidates = append(p.pendingCandidates, *candidate)
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
 	return p.pc.AddICECandidate(*candidate)
+}
+
+// markRemoteSetAndFlush 标记远端描述已就绪，并把缓冲的候选一次性灌入。
+func (p *Peer) markRemoteSetAndFlush() {
+	p.mu.Lock()
+	if p.remoteSet {
+		p.mu.Unlock()
+		return
+	}
+	p.remoteSet = true
+	pending := p.pendingCandidates
+	p.pendingCandidates = nil
+	p.mu.Unlock()
+
+	for i := range pending {
+		if err := p.pc.AddICECandidate(pending[i]); err != nil {
+			fmt.Printf("[WebRTC] Flush buffered ICE candidate failed: %v\n", err)
+		}
+	}
+	if len(pending) > 0 {
+		fmt.Printf("[WebRTC] Flushed %d buffered ICE candidate(s) after remote description\n", len(pending))
+	}
 }
 
 // gatherICECandidates 等待ICE候选收集完成

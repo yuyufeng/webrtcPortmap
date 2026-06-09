@@ -42,6 +42,14 @@ const (
 	MsgTypeWSData
 	MsgTypeWSClose
 	MsgTypeWSError
+
+	// 内嵌终端消息（持久 PTY 会话）
+	MsgTypeTermOpen   // 控制端 -> Agent：附着/打开终端，请求回放
+	MsgTypeTermData   // Agent -> 控制端：终端输出（可带 replay 标记）
+	MsgTypeTermInput  // 控制端 -> Agent：键盘输入
+	MsgTypeTermResize // 控制端 -> Agent：调整窗口大小
+	MsgTypeTermExit   // Agent -> 控制端：shell 进程已退出
+	MsgTypeTermClose  // 控制端 -> Agent：结束（可选重启）终端会话
 )
 
 func (t MessageType) String() string {
@@ -92,6 +100,18 @@ func (t MessageType) String() string {
 		return "WS_CLOSE"
 	case MsgTypeWSError:
 		return "WS_ERROR"
+	case MsgTypeTermOpen:
+		return "TERM_OPEN"
+	case MsgTypeTermData:
+		return "TERM_DATA"
+	case MsgTypeTermInput:
+		return "TERM_INPUT"
+	case MsgTypeTermResize:
+		return "TERM_RESIZE"
+	case MsgTypeTermExit:
+		return "TERM_EXIT"
+	case MsgTypeTermClose:
+		return "TERM_CLOSE"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}
@@ -221,6 +241,13 @@ type AgentConfig struct {
 	Ports      []PortInfo      `json:"ports"`
 	ICEServers []ICEServerInfo `json:"ice_servers,omitempty"`
 	Version    string          `json:"version,omitempty"`
+	Terminal   *TerminalInfo   `json:"terminal,omitempty"` // 内嵌终端能力（启用时才有值）
+}
+
+// TerminalInfo 描述 Agent 的内嵌终端能力
+type TerminalInfo struct {
+	Enabled bool   `json:"enabled"`         // 是否启用内嵌终端
+	Shell   string `json:"shell,omitempty"` // 实际使用的 shell，如 cmd/powershell/bash/sh
 }
 
 // ICEServerInfo 可序列化的 ICE server 配置
@@ -311,4 +338,35 @@ type WSClose struct {
 type WSError struct {
 	SocketID string `json:"socket_id"`
 	Error    string `json:"error"`
+}
+
+// ==================== 内嵌终端 ====================
+
+// TermOpenRequest 控制端请求打开/附着终端
+type TermOpenRequest struct {
+	Cols int `json:"cols,omitempty"` // 列数
+	Rows int `json:"rows,omitempty"` // 行数
+}
+
+// TermData Agent 向控制端推送的终端输出
+type TermData struct {
+	Data   []byte `json:"data"`             // 原始字节（JSON 中为 base64）
+	Replay bool   `json:"replay,omitempty"` // true 表示这是重连后的历史回放
+}
+
+// TermInput 控制端发送给 Agent 的键盘输入
+type TermInput struct {
+	Data []byte `json:"data"` // 原始字节（JSON 中为 base64）
+}
+
+// TermResize 控制端请求调整终端窗口大小
+type TermResize struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
+// TermExit Agent 通知控制端 shell 进程已退出
+type TermExit struct {
+	Code    int    `json:"code"`
+	Message string `json:"message,omitempty"`
 }

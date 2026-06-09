@@ -21,6 +21,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"webrtc-portmap/pkg/auth"
 	"webrtc-portmap/pkg/protocol"
+	"webrtc-portmap/pkg/terminal"
 	"webrtc-portmap/pkg/tunnel"
 	wr "webrtc-portmap/pkg/webrtc"
 )
@@ -50,6 +51,7 @@ type Agent struct {
 	sigToken  string
 	token     string
 	config    *wr.Config
+	useServerTurn bool
 	httpClient *http.Client
 	
 	peer        *wr.Peer
@@ -65,6 +67,15 @@ type Agent struct {
 
 	wsMu    sync.RWMutex
 	wsConns map[string]*wsProxyConn
+
+	// 内嵌终端（持久 PTY 会话，生命周期独立于 WebRTC 连接）
+	termEnabled  bool
+	termShell    string
+	termArgs     []string
+	termBufBytes int
+	termCwd      string
+	termMu       sync.Mutex
+	term         *terminal.Session
 
 	reconnectMu      sync.Mutex
 	reconnectRunning bool
@@ -114,6 +125,12 @@ func main() {
 		turnPass    = flag.String("turn-pass", "", "TURN password")
 		iceConfig   = flag.String("ice-config", "", "ICE servers config JSON file (optional, overrides -turn)")
 		portsFile   = flag.String("ports", "", "Ports config JSON file (optional)")
+		termEnabled = flag.Bool("terminal", false, "Enable embedded persistent terminal (ttyd-like)")
+		termShell   = flag.String("terminal-shell", "", "Terminal shell: cmd/powershell/bash/sh or full path (default: platform shell)")
+		termArgs    = flag.String("terminal-args", "", "Extra args passed to the shell (space-separated). Default for powershell/pwsh: -NoLogo -ExecutionPolicy Bypass")
+		termBufKB   = flag.Int("terminal-buffer", 256, "Terminal replay buffer size in KB")
+		termCwd     = flag.String("terminal-cwd", "", "Terminal working directory (default: current directory)")
+		useServerTurn = flag.Bool("use-server-turn", true, "Fetch embedded TURN relay credentials from the signaling server")
 	)
 	flag.Parse()
 
@@ -127,6 +144,13 @@ func main() {
 		displayName = *id
 	}
 
+	// 终端 shell 启动参数：用户显式提供则用其值（按空白切分）；
+	// 否则按 shell 取合理默认（powershell/pwsh 默认 -NoLogo -ExecutionPolicy Bypass）。
+	termShellArgs := strings.Fields(*termArgs)
+	if len(termShellArgs) == 0 {
+		termShellArgs = terminal.DefaultShellArgs(terminal.ResolveShell(*termShell))
+	}
+
 	agent := &Agent{
 		id:          *id,
 		displayName: displayName,
@@ -137,6 +161,12 @@ func main() {
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		stopChan:    make(chan struct{}),
 		wsConns:     make(map[string]*wsProxyConn),
+		useServerTurn: *useServerTurn,
+		termEnabled: *termEnabled,
+		termShell:   *termShell,
+		termArgs:    termShellArgs,
+		termBufBytes: *termBufKB * 1024,
+		termCwd:     *termCwd,
 	}
 
 	// 加载端口配置
@@ -181,6 +211,15 @@ func main() {
 			fmt.Printf("  - %s (%s): %s [%s]\n", p.Name, p.ID, p.LocalAddr, p.Protocol)
 		}
 	}
+	if agent.termEnabled {
+		argsStr := "(none)"
+		if len(agent.termArgs) > 0 {
+			argsStr = strings.Join(agent.termArgs, " ")
+		}
+		fmt.Printf("[Agent] Embedded terminal: ENABLED (shell=%s, args=%s, buffer=%dKB)\n", terminal.ResolveShell(agent.termShell), argsStr, *termBufKB)
+	} else {
+		fmt.Printf("[Agent] Embedded terminal: disabled (use -terminal to enable)\n")
+	}
 	fmt.Printf("[Agent] Signaling server: %s\n", *sigURL)
 	fmt.Printf("[Agent] Press Ctrl+C to exit\n")
 
@@ -203,6 +242,7 @@ func main() {
 
 	fmt.Println("\n[Agent] Shutting down...")
 	close(agent.stopChan)
+	agent.closeTerminal()
 	if agent.peer != nil {
 		agent.peer.Close()
 	}
@@ -436,6 +476,59 @@ func (a *Agent) handleSignalingMessage(msg *SignalMessage) {
 	}
 }
 
+// peerConfig 返回本次连接使用的 WebRTC 配置：在 agent 自身 ICE 配置基础上，
+// 按需附加信令服务下发的内嵌 TURN 临时凭据，让 agent 也能收集 relay 候选
+//（流量归属到 owner 用户）。用户显式用 -turn/-ice-config 配的项仍保留。
+func (a *Agent) peerConfig() *wr.Config {
+	if !a.useServerTurn || a.token == "" {
+		return a.config
+	}
+	servers := a.fetchServerTURN()
+	if len(servers) == 0 {
+		return a.config
+	}
+	merged := &wr.Config{ICEServers: make([]webrtc.ICEServer, 0, len(a.config.ICEServers)+len(servers))}
+	merged.ICEServers = append(merged.ICEServers, servers...) // server TURN 在前
+	merged.ICEServers = append(merged.ICEServers, a.config.ICEServers...)
+	return merged
+}
+
+// fetchServerTURN 向信令服务拉取内嵌 TURN 临时凭据，转成 webrtc.ICEServer 列表。
+func (a *Agent) fetchServerTURN() []webrtc.ICEServer {
+	req, err := http.NewRequest(http.MethodGet, a.sigURL+"/agent/turn-credentials", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", a.token)
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		fmt.Printf("[Agent] Fetch server TURN failed: %v\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var body struct {
+		TurnEnabled bool     `json:"turn_enabled"`
+		URLs        []string `json:"urls"`
+		Username    string   `json:"username"`
+		Credential  string   `json:"credential"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil
+	}
+	if !body.TurnEnabled || len(body.URLs) == 0 {
+		return nil
+	}
+	fmt.Printf("[Agent] Using server TURN relay (%d url) for this connection\n", len(body.URLs))
+	return []webrtc.ICEServer{{
+		URLs:       body.URLs,
+		Username:   body.Username,
+		Credential: body.Credential,
+	}}
+}
+
 // handleOffer 处理Offer
 func (a *Agent) handleOffer(offer *webrtc.SessionDescription) {
 	fmt.Printf("[Agent] Received offer, creating answer...\n")
@@ -452,8 +545,8 @@ func (a *Agent) handleOffer(offer *webrtc.SessionDescription) {
 		a.cleanup()
 	}
 
-	// 创建Peer
-	peer, err := wr.NewPeer(a.config)
+	// 创建Peer（按需合并信令服务下发的临时 TURN 中转凭据）
+	peer, err := wr.NewPeer(a.peerConfig())
 	if err != nil {
 		fmt.Printf("[Agent] Failed to create peer: %v\n", err)
 		return
@@ -472,9 +565,14 @@ func (a *Agent) handleOffer(offer *webrtc.SessionDescription) {
 
 	peer.SetOnConnectionState(func(s webrtc.PeerConnectionState) {
 		switch s {
-		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			// 仅在 ICE 彻底失败或连接关闭时清理。
+			// Disconnected 是可恢复的瞬态（relay 切换/短暂丢包都会经过它），
+			// 此时若立刻 cleanup 会拆掉本可自愈或回退到 TURN 中转的连接。
 			fmt.Printf("[Agent] Peer state=%s, cleaning up session\n", s.String())
 			a.cleanup()
+		case webrtc.PeerConnectionStateDisconnected:
+			fmt.Printf("[Agent] Peer state=disconnected (transient), waiting for recovery or failure...\n")
 		}
 	})
 
@@ -600,6 +698,14 @@ func (a *Agent) handleMessage(data []byte) {
 		go a.handleWSData(msg.Payload)
 	case protocol.MsgTypeWSClose:
 		go a.handleWSClose(msg.Payload)
+	case protocol.MsgTypeTermOpen:
+		go a.handleTermOpen(msg.Payload)
+	case protocol.MsgTypeTermInput:
+		a.handleTermInput(msg.Payload)
+	case protocol.MsgTypeTermResize:
+		a.handleTermResize(msg.Payload)
+	case protocol.MsgTypeTermClose:
+		a.handleTermClose(msg.Payload)
 	case protocol.MsgTypePing:
 		a.handlePing(&msg)
 	default:
@@ -657,6 +763,12 @@ func (a *Agent) sendAgentConfig() {
 		Ports:      a.ports,
 		ICEServers: convertICEServers(a.config.ICEServers),
 		Version:    "1.0",
+	}
+	if a.termEnabled {
+		config.Terminal = &protocol.TerminalInfo{
+			Enabled: true,
+			Shell:   terminal.ResolveShell(a.termShell),
+		}
 	}
 	
 	msg, err := protocol.NewMessage(protocol.MsgTypeAgentConfig, config)
@@ -1175,6 +1287,9 @@ func (a *Agent) sendMessage(msg *protocol.Message) error {
 
 // cleanup 清理资源
 func (a *Agent) cleanup() {
+	// 终端会话只解除输出回调（Detach），不杀进程——断线后进程继续运行，
+	// 输出继续写入环形缓冲，重连时即可回放，做到“断线不重置反馈”。
+	a.detachTerminal()
 	if a.clientTunnel != nil {
 		a.clientTunnel.CloseAll()
 	}
@@ -1191,4 +1306,170 @@ func (a *Agent) cleanup() {
 		a.peer = nil
 	}
 	a.authenticated = false
+}
+
+// ==================== 内嵌终端 ====================
+
+// ensureTerminal 惰性创建（或在旧会话已退出时重建）持久终端会话。
+// 一个 agent 始终只持有一个独享的终端会话。
+func (a *Agent) ensureTerminal(cols, rows int) (*terminal.Session, error) {
+	a.termMu.Lock()
+	defer a.termMu.Unlock()
+
+	if a.term != nil && a.term.Alive() {
+		return a.term, nil
+	}
+	// 旧会话已退出则先回收，再开新会话。
+	if a.term != nil {
+		_ = a.term.Close()
+		a.term = nil
+	}
+
+	sess, err := terminal.New(terminal.Config{
+		Shell:      a.termShell,
+		Args:       a.termArgs,
+		BufferSize: a.termBufBytes,
+		Cols:       cols,
+		Rows:       rows,
+		Dir:        a.termCwd,
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.term = sess
+	fmt.Printf("[Agent][Term] Started session shell=%s\n", sess.Shell())
+	return sess, nil
+}
+
+func (a *Agent) currentTerminal() *terminal.Session {
+	a.termMu.Lock()
+	defer a.termMu.Unlock()
+	return a.term
+}
+
+// handleTermOpen 控制端打开/重新附着终端：挂接实时输出并先回放历史缓冲。
+func (a *Agent) handleTermOpen(payload []byte) {
+	if !a.termEnabled {
+		a.sendTermExit(-1, "terminal is not enabled on this agent")
+		return
+	}
+
+	var req protocol.TermOpenRequest
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &req); err != nil {
+			fmt.Printf("[Agent][Term] Bad open request: %v\n", err)
+		}
+	}
+
+	sess, err := a.ensureTerminal(req.Cols, req.Rows)
+	if err != nil {
+		fmt.Printf("[Agent][Term] Failed to start terminal: %v\n", err)
+		a.sendTermExit(-1, fmt.Sprintf("failed to start terminal: %v", err))
+		return
+	}
+
+	if req.Cols > 0 && req.Rows > 0 {
+		_ = sess.Resize(req.Cols, req.Rows)
+	}
+
+	// 实时输出回调：始终发送到当前 peer（断线后 peer 失效则发送报错被忽略）。
+	sink := func(b []byte) {
+		msg, err := protocol.NewMessage(protocol.MsgTypeTermData, protocol.TermData{Data: b})
+		if err != nil {
+			return
+		}
+		_ = a.sendMessage(msg)
+	}
+
+	// 原子地：先发回放快照，再挂接实时 sink，保证字节顺序。
+	sess.AttachWithReplay(func(snapshot []byte) {
+		if len(snapshot) == 0 {
+			return
+		}
+		msg, err := protocol.NewMessage(protocol.MsgTypeTermData, protocol.TermData{Data: snapshot, Replay: true})
+		if err != nil {
+			return
+		}
+		_ = a.sendMessage(msg)
+		fmt.Printf("[Agent][Term] Replayed %d bytes on attach\n", len(snapshot))
+	}, sink)
+
+	// 进程退出时通知控制端。
+	sess.SetOnExit(func(code int) {
+		a.sendTermExit(code, "shell exited")
+	})
+}
+
+func (a *Agent) handleTermInput(payload []byte) {
+	sess := a.currentTerminal()
+	if sess == nil {
+		return
+	}
+	var in protocol.TermInput
+	if err := json.Unmarshal(payload, &in); err != nil {
+		return
+	}
+	if len(in.Data) == 0 {
+		return
+	}
+	if err := sess.Write(in.Data); err != nil {
+		fmt.Printf("[Agent][Term] Write failed: %v\n", err)
+	}
+}
+
+func (a *Agent) handleTermResize(payload []byte) {
+	sess := a.currentTerminal()
+	if sess == nil {
+		return
+	}
+	var rs protocol.TermResize
+	if err := json.Unmarshal(payload, &rs); err != nil {
+		return
+	}
+	if err := sess.Resize(rs.Cols, rs.Rows); err != nil {
+		fmt.Printf("[Agent][Term] Resize failed: %v\n", err)
+	}
+}
+
+// handleTermClose 控制端主动结束终端会话（彻底关闭进程）。
+func (a *Agent) handleTermClose(_ []byte) {
+	a.closeTerminal()
+}
+
+// detachTerminal 仅解除输出回调，进程与缓冲继续保留（断线时调用）。
+func (a *Agent) detachTerminal() {
+	a.termMu.Lock()
+	sess := a.term
+	a.termMu.Unlock()
+	if sess != nil {
+		sess.Detach()
+	}
+}
+
+// closeTerminal 彻底关闭终端会话（关停进程，下一次打开会重建）。
+func (a *Agent) closeTerminal() {
+	a.termMu.Lock()
+	sess := a.term
+	a.term = nil
+	a.termMu.Unlock()
+	if sess != nil {
+		_ = sess.Close()
+		fmt.Printf("[Agent][Term] Session closed\n")
+	}
+}
+
+func (a *Agent) sendTermData(data []byte, replay bool) {
+	msg, err := protocol.NewMessage(protocol.MsgTypeTermData, protocol.TermData{Data: data, Replay: replay})
+	if err != nil {
+		return
+	}
+	_ = a.sendMessage(msg)
+}
+
+func (a *Agent) sendTermExit(code int, message string) {
+	msg, err := protocol.NewMessage(protocol.MsgTypeTermExit, protocol.TermExit{Code: code, Message: message})
+	if err != nil {
+		return
+	}
+	_ = a.sendMessage(msg)
 }
