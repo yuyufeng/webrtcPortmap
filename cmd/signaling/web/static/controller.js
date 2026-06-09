@@ -931,11 +931,22 @@ async function createPeerConnection() {
     };
 }
 
+// 应用层协议版本，必须与 agent/client 的 protocol.ProtocolVersion 一致。
+const PROTOCOL_VERSION = 2;
+
 function createDataChannel() {
     state.dataChannel = state.pc.createDataChannel('portmap', { ordered: true });
-    
+
     state.dataChannel.onopen = () => {
         log('DataChannel已打开，等待 Agent 鉴权挑战...');
+        state.peerHelloSeen = false;
+        sendProtocolMessage({ type: 30, payload: { version: PROTOCOL_VERSION } });
+        setTimeout(() => {
+            if (!state.authenticated && !state.peerHelloSeen) {
+                log('未收到 Agent 协议版本握手，Agent/前端版本可能不一致', 'error');
+                showStatus('password-status', '协议版本握手超时：请确认 Agent 与本页面为同一版本', 'error');
+            }
+        }, 10000);
     };
     
     state.dataChannel.onclose = () => {
@@ -1053,6 +1064,19 @@ async function handleDataChannelMessage(data) {
     try {
         const msg = JSON.parse(data);
         
+        if (msg.type === 30) {
+            // Agent 协议版本握手
+            state.peerHelloSeen = true;
+            const ver = (msg.payload && msg.payload.version) || 0;
+            if (ver !== PROTOCOL_VERSION) {
+                log(`协议版本不匹配：Agent=v${ver}, 前端=v${PROTOCOL_VERSION}`, 'error');
+                showStatus('password-status', `鉴权失败：协议版本不匹配（Agent v${ver} / 前端 v${PROTOCOL_VERSION}），请升级到同一版本`, 'error');
+                try { state.pc && state.pc.close(); } catch (e) {}
+                return;
+            }
+            log(`Agent 协议 v${ver} 校验通过`);
+            return;
+        }
         if (msg.type === 1) {
             // 收到 Agent 的挑战 → 用密码计算响应回去，由 Agent 校验。
             const { challenge, timestamp } = msg.payload || {};

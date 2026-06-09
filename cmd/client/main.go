@@ -130,6 +130,7 @@ type Client struct {
 	tunnelMgr     *tunnel.Manager
 	stopChan      chan struct{}
 	authenticated bool
+	helloSeen     bool // 是否已收到 agent 的协议版本握手（Hello）
 	agentConfig   *protocol.AgentConfig
 	selectedAgent *AgentInfo
 	maps          []localMapSpec
@@ -455,6 +456,17 @@ func (c *Client) connect() error {
 	})
 	peer.SetOnDataChannelOpen(func() {
 		fmt.Printf("[Client] Data channel opened, waiting for agent authentication challenge...\n")
+		if hello, err := protocol.NewMessage(protocol.MsgTypeHello, protocol.Hello{Version: protocol.ProtocolVersion}); err == nil {
+			_ = c.sendMessage(hello)
+		}
+		p := c.peer
+		go func() {
+			time.Sleep(10 * time.Second)
+			if c.peer == p && !c.authenticated && !c.helloSeen {
+				fmt.Printf("[Client] No protocol handshake from agent within 10s — agent may be an incompatible/old version. Upgrade both ends to the same version.\n")
+				c.cleanup()
+			}
+		}()
 	})
 
 	offer, err := peer.CreateOffer()
@@ -584,6 +596,10 @@ func (c *Client) handleMessage(data []byte) {
 		return
 	}
 
+	if msg.Type == protocol.MsgTypeHello {
+		c.handleHello(msg.Payload)
+		return
+	}
 	if !c.authenticated {
 		c.handleAuthMessage(&msg)
 		return
@@ -648,6 +664,22 @@ func (c *Client) handleMessage(data []byte) {
 			fmt.Printf("[Client] Ignored message type: %s\n", msg.Type.String())
 		}
 	}
+}
+
+// handleHello 校验 agent 的协议版本，版本不一致即断开。
+func (c *Client) handleHello(payload json.RawMessage) {
+	c.helloSeen = true
+	var h protocol.Hello
+	if err := json.Unmarshal(payload, &h); err != nil {
+		fmt.Printf("[Client] Bad hello payload: %v\n", err)
+		return
+	}
+	if h.Version != protocol.ProtocolVersion {
+		fmt.Printf("[Client] Protocol version mismatch: agent=v%d client=v%d. Upgrade both ends to the same version.\n", h.Version, protocol.ProtocolVersion)
+		c.cleanup()
+		return
+	}
+	fmt.Printf("[Client] Agent protocol v%d OK\n", h.Version)
 }
 
 func (c *Client) handleAuthMessage(msg *protocol.Message) {
@@ -886,6 +918,7 @@ func (c *Client) cleanup() {
 		c.signalConn = nil
 	}
 	c.authenticated = false
+	c.helloSeen = false
 }
 
 // ==================== 终端模式 ====================

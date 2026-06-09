@@ -50,7 +50,19 @@ const (
 	MsgTypeTermResize // 控制端 -> Agent：调整窗口大小
 	MsgTypeTermExit   // Agent -> 控制端：shell 进程已退出
 	MsgTypeTermClose  // 控制端 -> Agent：结束（可选重启）终端会话
+
+	// 协议版本握手（DataChannel 打开后双方各发一次，用于检测版本不匹配）
+	MsgTypeHello
 )
+
+// ProtocolVersion 是 DataChannel 应用层握手协议版本；鉴权方向/消息语义变更时递增，两端必须一致。
+// v2: agent 作为校验方出挑战并自验（v1 为控制端出挑战并校验）。
+const ProtocolVersion = 2
+
+// Hello 协议版本握手消息（DataChannel 打开后 agent 与控制端/CLI 各发一次）。
+type Hello struct {
+	Version int `json:"version"`
+}
 
 func (t MessageType) String() string {
 	switch t {
@@ -112,6 +124,8 @@ func (t MessageType) String() string {
 		return "TERM_EXIT"
 	case MsgTypeTermClose:
 		return "TERM_CLOSE"
+	case MsgTypeHello:
+		return "HELLO"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}

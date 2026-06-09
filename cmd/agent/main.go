@@ -65,6 +65,7 @@ type Agent struct {
 	clientTunnel *tunnel.ClientManager
 	
 	authenticated bool
+	helloSeen     bool // 是否已收到对端的协议版本握手（Hello）
 	stopChan      chan struct{}
 	
 	// 端口配置
@@ -870,6 +871,10 @@ func (a *Agent) handleDataChannel() {
 		a.sendAgentConfig()
 		return
 	}
+	// 先发协议版本握手（Hello），再下发鉴权挑战。
+	if hello, herr := protocol.NewMessage(protocol.MsgTypeHello, protocol.Hello{Version: protocol.ProtocolVersion}); herr == nil {
+		a.sendMessage(hello)
+	}
 	// 通道就绪后主动下发挑战，等待对端用密码响应、由 agent 校验。
 	challengeMsg, err := a.handshaker.CreateChallenge()
 	if err != nil {
@@ -878,7 +883,17 @@ func (a *Agent) handleDataChannel() {
 		return
 	}
 	a.sendMessage(challengeMsg)
-	fmt.Printf("[Agent] Data channel opened, challenge sent, waiting for response...\n")
+	fmt.Printf("[Agent] Data channel opened, hello+challenge sent, waiting for response...\n")
+
+	// 版本握手超时：10s 内既没收到对端 Hello、也没完成鉴权 → 对端可能版本不兼容/无响应。
+	peer := a.peer
+	go func() {
+		time.Sleep(10 * time.Second)
+		if a.peer == peer && !a.authenticated && !a.helloSeen {
+			fmt.Printf("[Agent] No protocol handshake from peer within 10s (peer may be incompatible/old). Closing.\n")
+			a.cleanup()
+		}
+	}()
 }
 
 // handleMessage 处理接收到的消息
@@ -891,8 +906,16 @@ func (a *Agent) handleMessage(data []byte) {
 		return
 	}
 
-	// 鉴权消息始终优先处理，避免旧 authenticated 状态把新的 challenge 当成普通消息吞掉。
+	// 版本握手 / 鉴权消息始终优先处理。
 	switch msg.Type {
+	case protocol.MsgTypeHello:
+		a.handleHello(msg.Payload)
+		return
+	case protocol.MsgTypeAuthChallenge:
+		// 新版 agent 是校验方、不应收到挑战；收到说明对端是旧版（v1 方向）。
+		fmt.Printf("[Agent] Protocol mismatch: peer sent AuthChallenge (old v1 direction). Upgrade client/web to v%d. Closing.\n", protocol.ProtocolVersion)
+		a.cleanup()
+		return
 	case protocol.MsgTypeAuthResponse:
 		a.handleAuthMessage(data)
 		return
@@ -949,6 +972,22 @@ func (a *Agent) handleMessage(data []byte) {
 	default:
 		fmt.Printf("[Agent] Unknown message type: %d\n", msg.Type)
 	}
+}
+
+// handleHello 处理对端协议版本握手，版本不一致即断开。
+func (a *Agent) handleHello(payload json.RawMessage) {
+	a.helloSeen = true
+	var h protocol.Hello
+	if err := json.Unmarshal(payload, &h); err != nil {
+		fmt.Printf("[Agent] Bad hello payload: %v\n", err)
+		return
+	}
+	if h.Version != protocol.ProtocolVersion {
+		fmt.Printf("[Agent] Protocol version mismatch: peer=v%d self=v%d. Upgrade both ends to the same version. Closing.\n", h.Version, protocol.ProtocolVersion)
+		a.cleanup()
+		return
+	}
+	fmt.Printf("[Agent] Peer protocol v%d OK\n", h.Version)
 }
 
 // handleAuthMessage 处理鉴权消息
@@ -1540,6 +1579,7 @@ func (a *Agent) cleanup() {
 		a.peer = nil
 	}
 	a.authenticated = false
+	a.helloSeen = false
 }
 
 // ==================== 内嵌终端 ====================
