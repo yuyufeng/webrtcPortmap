@@ -568,6 +568,33 @@ func (ds *DataStore) GetSession(token string) (*UserSession, *UserRecord) {
 	return session, user
 }
 
+// randomAgentID 生成随机 agent 内部句柄；调用方需在持锁下校验全局唯一。
+func randomAgentID() string {
+	b := make([]byte, 5)
+	_, _ = rand.Read(b)
+	return "agent-" + hex.EncodeToString(b)
+}
+
+// findAgentByOwnerNameLocked 在持锁状态下按 (owner, 名称) 查找登记记录。
+// 名称为用户视角的主标识——同名即同一 agent。
+func (ds *DataStore) findAgentByOwnerNameLocked(ownerUserID, name string) *AgentRegistration {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	for _, rec := range ds.data.Agents {
+		if rec.OwnerUserID == ownerUserID && rec.DisplayName == name {
+			return rec
+		}
+	}
+	return nil
+}
+
+// UpsertAgentByUserHash 按 owner 登记/更新 agent。
+//
+// 身份模型：在某用户名下，display_name（名称）为主标识——同名即同一 agent，
+// 重连/重启按名称命中并复用其记录与 agent_id；agent_id 仅作全局唯一内部句柄，
+// 缺省或与已有记录（可能属于他人）冲突时自动生成，不再作为必填项。
 func (ds *DataStore) UpsertAgentByUserHash(userHash, agentID, displayName, description string) (*AgentRegistration, error) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
@@ -580,34 +607,50 @@ func (ds *DataStore) UpsertAgentByUserHash(userHash, agentID, displayName, descr
 		return nil, fmt.Errorf("owner user not found")
 	}
 	agentID = strings.TrimSpace(agentID)
-	if agentID == "" || displayName == "" {
-		return nil, fmt.Errorf("agent_id and display_name are required")
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		name = agentID // 名称缺省回退到 id
 	}
 	now := time.Now()
-	record := ds.data.Agents[agentID]
-	if record != nil && record.OwnerUserID != user.ID {
-		return nil, fmt.Errorf("agent_id already belongs to another account")
-	}
-	if record == nil {
-		record = &AgentRegistration{
-			AgentID:      agentID,
-			TenantCode:   user.TenantCode,
-			OwnerUserID:  user.ID,
-			OwnerUserHash: user.UserHash,
-			DisplayName:  strings.TrimSpace(displayName),
-			Description:  strings.TrimSpace(description),
-			CreatedAt:    now,
-			UpdatedAt:    now,
+
+	// 1) 在该 owner 名下按名称优先匹配：命中则视为同一 agent，复用其记录与 agent_id。
+	if rec := ds.findAgentByOwnerNameLocked(user.ID, name); rec != nil {
+		rec.TenantCode = user.TenantCode
+		rec.OwnerUserID = user.ID
+		rec.OwnerUserHash = user.UserHash
+		rec.Description = strings.TrimSpace(description)
+		rec.UpdatedAt = now
+		if err := ds.saveLocked(); err != nil {
+			return nil, err
 		}
-		ds.data.Agents[agentID] = record
-	} else {
-		record.TenantCode = user.TenantCode
-		record.OwnerUserID = user.ID
-		record.OwnerUserHash = user.UserHash
-		record.DisplayName = strings.TrimSpace(displayName)
-		record.Description = strings.TrimSpace(description)
-		record.UpdatedAt = now
+		return rec, nil
 	}
+
+	// 2) 未按名称命中 → 选定一个全局唯一的 agent_id：
+	//    缺省、或与已有记录冲突（不唯一）则自动生成，直至唯一。
+	if agentID == "" || ds.data.Agents[agentID] != nil {
+		for {
+			agentID = randomAgentID()
+			if ds.data.Agents[agentID] == nil {
+				break
+			}
+		}
+	}
+	if name == "" {
+		name = agentID // 名称与 id 均为空时用生成的 id 兜底
+	}
+
+	record := &AgentRegistration{
+		AgentID:       agentID,
+		TenantCode:    user.TenantCode,
+		OwnerUserID:   user.ID,
+		OwnerUserHash: user.UserHash,
+		DisplayName:   name,
+		Description:   strings.TrimSpace(description),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	ds.data.Agents[agentID] = record
 	if err := ds.saveLocked(); err != nil {
 		return nil, err
 	}

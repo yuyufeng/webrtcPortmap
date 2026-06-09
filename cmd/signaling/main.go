@@ -747,10 +747,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if req.ID == "" {
-		http.Error(w, "Missing agent ID", http.StatusBadRequest)
-		return
-	}
+	// agent_id 不再必填：缺省或与他人冲突时由存储层自动生成全局唯一句柄。
 	if s.authToken != "" && req.AuthToken != s.authToken {
 		http.Error(w, "Invalid auth token", http.StatusUnauthorized)
 		return
@@ -771,17 +768,19 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	// 以存储层规整后的 agent_id 为权威句柄（可能为自动生成/复用值）。
+	agentID := registration.AgentID
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existingAgent, ok := s.agents[req.ID]; ok {
+	if existingAgent, ok := s.agents[agentID]; ok {
 		close(existingAgent.ControllerCh)
 		close(existingAgent.AgentCh)
 		delete(s.tokens, existingAgent.Token)
-		fmt.Printf("[Signaling] Agent re-registered: %s\n", req.ID)
+		fmt.Printf("[Signaling] Agent re-registered: %s\n", agentID)
 	}
 	token := generateToken()
 	agent := &AgentInfo{
-		ID:           req.ID,
+		ID:           agentID,
 		Token:        token,
 		DisplayName:  registration.DisplayName,
 		TenantCode:   registration.TenantCode,
@@ -792,12 +791,12 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		ControllerCh: make(chan *SignalMessage, 10),
 		AgentCh:      make(chan *SignalMessage, 10),
 	}
-	s.agents[req.ID] = agent
-	s.tokens[token] = req.ID
-	fmt.Printf("[Signaling] Agent registered: %s (token=%s)\n", req.ID, token[:8])
+	s.agents[agentID] = agent
+	s.tokens[token] = agentID
+	fmt.Printf("[Signaling] Agent registered: %s (token=%s)\n", agentID, token[:8])
 	resp := map[string]string{
 		"token":        token,
-		"agent_id":     req.ID,
+		"agent_id":     agentID,
 		"display_name": registration.DisplayName,
 	}
 	writeJSON(w, resp, http.StatusOK)
