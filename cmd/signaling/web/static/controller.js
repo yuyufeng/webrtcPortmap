@@ -163,8 +163,10 @@ function updateCurrentUserUI() {
     const clientStartCommand = document.getElementById('client-start-command');
     const agentDownloadURLWindows = document.getElementById('agent-download-url-windows');
     const agentDownloadURLLinux = document.getElementById('agent-download-url-linux');
+    const agentDownloadURLMac = document.getElementById('agent-download-url-mac');
     const clientDownloadURLWindows = document.getElementById('client-download-url-windows');
     const clientDownloadURLLinux = document.getElementById('client-download-url-linux');
+    const clientDownloadURLMac = document.getElementById('client-download-url-mac');
     if (currentUser) currentUser.textContent = text;
     if (agentListUser) agentListUser.textContent = text;
     if (userHash) userHash.value = state.currentUser?.user_hash || '';
@@ -181,11 +183,17 @@ function updateCurrentUserUI() {
     if (agentDownloadURLLinux) {
         setDownloadLink(agentDownloadURLLinux, `${signalURL}/download/agent/linux`);
     }
+    if (agentDownloadURLMac) {
+        setDownloadLink(agentDownloadURLMac, `${signalURL}/download/agent/mac`);
+    }
     if (clientDownloadURLWindows) {
         setDownloadLink(clientDownloadURLWindows, `${signalURL}/download/client/windows`);
     }
     if (clientDownloadURLLinux) {
         setDownloadLink(clientDownloadURLLinux, `${signalURL}/download/client/linux`);
+    }
+    if (clientDownloadURLMac) {
+        setDownloadLink(clientDownloadURLMac, `${signalURL}/download/client/mac`);
     }
     if (agentStartCommand) {
         agentStartCommand.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -terminal\n`
@@ -2734,3 +2742,18 @@ window.changePassword = changePassword;
 window.PREVIEW_PATH_REWRITE_RULES = PREVIEW_PATH_REWRITE_RULES;
 window.WEB_CONSOLE_BASE = getWebConsoleBase();
 window.PROXY_SERVICE_BASE = getProxyServiceBase();
+
+// ==================== 构建版本时间戳 ====================
+// 取 controller.js?v=<yyyyMMddHHmmss>（构建脚本每次构建自动更新），格式化显示在右下角，
+// 方便一眼确认当前页面是否最新版（旧缓存/旧二进制时间戳会偏小）。
+(function showBuildStamp() {
+    const el = document.getElementById('build-stamp');
+    if (!el) return;
+    let v = '';
+    const s = [...document.scripts].find(x => /controller\.js/.test(x.src || ''));
+    if (s) { const m = (s.src || '').match(/[?&]v=([0-9A-Za-z]+)/); if (m) v = m[1]; }
+    let label = v;
+    const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(v);
+    if (m) label = `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+    el.textContent = label ? `build ${label}` : 'build dev';
+})();

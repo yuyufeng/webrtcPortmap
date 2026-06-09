@@ -900,6 +900,16 @@ Accept: text/html,application/xhtml+xml</textarea>
         </div>
     </div>
 
+    <!-- 构建版本/时间戳（右下角，一眼判断页面是否最新版） -->
+    <div id="build-stamp" title="页面构建时间，用于确认是否最新版"></div>
+    <style>
+        #build-stamp {
+            position: fixed; right: 8px; bottom: 6px; z-index: 9998;
+            font: 11px/1.4 Consolas, monospace; color: #9aa3ad;
+            background: rgba(255,255,255,.7); padding: 2px 7px; border-radius: 6px;
+            pointer-events: none; user-select: none;
+        }
+    </style>
     <!-- 远程终端浮动窗口（大显示空间，可拖动/缩放/最大化） -->
     <style>
         .terminal-float {
@@ -937,6 +947,6 @@ Accept: text/html,application/xhtml+xml</textarea>
         <div id="terminal-host" class="terminal-float-host"></div>
     </div>
 
-    <script src="controller.js?v=20260608171624"></script>
+    <script src="controller.js?v=20260609113301"></script>
 </body>
 </html>

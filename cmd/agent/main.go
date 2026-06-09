@@ -533,15 +533,12 @@ func (a *Agent) fetchServerTURN() []webrtc.ICEServer {
 func (a *Agent) handleOffer(offer *webrtc.SessionDescription) {
 	fmt.Printf("[Agent] Received offer, creating answer...\n")
 
-	// agent 只允许一个活跃控制会话，新的 offer 不再打断旧会话。
-	if a.peer != nil && (a.peer.IsDataChannelOpen() || a.authenticated) {
-		fmt.Printf("[Agent] Rejecting new offer because an active session is already running\n")
-		return
-	}
-
-	// 如果存在未完成/残留的旧会话，再清理后重建。
+	// 新连接强制抢占旧会话（last-connection-wins）：否则某用户忘记断开后，
+	// 换设备/换地点时会被僵死的旧连接永久占用、永远无法接入。
+	// cleanup() 对终端只 Detach 不杀进程，新连接随后 AttachWithReplay 即可
+	// 无缝接管（断线不重置反馈）；连接到达本函数前已过信令层账户/归属鉴权。
 	if a.peer != nil || a.authenticated {
-		fmt.Printf("[Agent] Cleaning up stale session before handling new offer\n")
+		fmt.Printf("[Agent] Preempting existing session for the new offer (last connection wins)\n")
 		a.cleanup()
 	}
 

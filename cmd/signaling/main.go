@@ -303,42 +303,35 @@ func (s *Server) handleBinaryDownload(w http.ResponseWriter, r *http.Request, na
 }
 
 func binaryCandidates(name, platform string) []string {
+	// 各平台的文件名候选（与 bin/ 构建产物对齐：优先精确平台名，再退回无后缀名）。
+	var files []string
 	switch strings.ToLower(strings.TrimSpace(platform)) {
 	case "windows", "win":
-		return []string{
-			filepath.Join("bin", name+"-windows-amd64.exe"),
-			filepath.Join("bin", name+".exe"),
-			filepath.Join(".", name+"-windows-amd64.exe"),
-			filepath.Join(".", name+".exe"),
-		}
+		files = []string{name + "-windows-amd64.exe", name + ".exe"}
 	case "linux":
-		return []string{
-			filepath.Join("bin", name+"-linux-amd64"),
-			filepath.Join("bin", name),
-			filepath.Join(".", name+"-linux-amd64"),
-			filepath.Join(".", name),
-		}
+		files = []string{name + "-linux-amd64", name}
 	case "darwin", "mac", "macos":
-		return []string{
-			filepath.Join("bin", name+"-darwin-amd64"),
-			filepath.Join("bin", name),
-			filepath.Join(".", name+"-darwin-amd64"),
-			filepath.Join(".", name),
-		}
+		files = []string{name + "-darwin-amd64", name}
 	default:
-		return []string{
-			filepath.Join("bin", name+"-windows-amd64.exe"),
-			filepath.Join("bin", name+"-linux-amd64"),
-			filepath.Join("bin", name+"-darwin-amd64"),
-			filepath.Join("bin", name+".exe"),
-			filepath.Join("bin", name),
-			filepath.Join(".", name+"-windows-amd64.exe"),
-			filepath.Join(".", name+"-linux-amd64"),
-			filepath.Join(".", name+"-darwin-amd64"),
-			filepath.Join(".", name+".exe"),
-			filepath.Join(".", name),
+		files = []string{
+			name + "-windows-amd64.exe", name + "-linux-amd64", name + "-darwin-amd64",
+			name + ".exe", name,
 		}
 	}
+	// 搜索目录：当前工作目录的 bin/ 与 .；以及 signaling 可执行文件所在目录的 bin/ 与其自身
+	// （便于 systemd 等部署场景把下载用二进制放在 /usr/local/bin/ 旁边）。
+	dirs := []string{"bin", "."}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		dirs = append(dirs, filepath.Join(exeDir, "bin"), exeDir)
+	}
+	out := make([]string, 0, len(dirs)*len(files))
+	for _, d := range dirs {
+		for _, f := range files {
+			out = append(out, filepath.Join(d, f))
+		}
+	}
+	return out
 }
 
 func bearerToken(r *http.Request) string {
