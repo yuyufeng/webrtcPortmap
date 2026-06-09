@@ -236,6 +236,10 @@ agent 日志 `Started session` 仅一次、重连为 `Replayed N bytes on attach
 
 - **新增协议消息**：同时改 `pkg/protocol/message.go`（常量 + `String()` + payload struct）、
   Agent/Client 的 `handleMessage`、以及前端 `controller.js` 的数字分发，三处保持编号一致。
+- **协议版本（`protocol.ProtocolVersion`）**：凡改动 **DataChannel 应用层鉴权方向或消息语义**，
+  必须把它 **+1**，并让 agent / client / 前端 `controller.js`（`PROTOCOL_VERSION`）三端同步同值。
+  DataChannel 打开后两端各发一次 `Hello{version}`，不一致会明确提示并断开（见「鉴权方向互换」），
+  否则新旧混用会握手失败且原因不明。当前为 **v2**（agent 作为校验方出挑战）。
 - **跨平台代码**用文件级 build tag（参考 `cmd/client/resize_*.go`），避免在共用文件里引用平台专有符号
   （如 `syscall.SIGWINCH` 在 Windows 不存在）。
 - 构建用 `CGO_ENABLED=0`，go-pty 在 Unix/Windows 均为纯 Go，无需 cgo。
