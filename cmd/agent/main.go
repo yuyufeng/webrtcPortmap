@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +14,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +23,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
+	"golang.org/x/term"
 	"webrtc-portmap/pkg/auth"
 	"webrtc-portmap/pkg/protocol"
 	"webrtc-portmap/pkg/terminal"
@@ -111,10 +116,210 @@ func convertICEServers(servers []webrtc.ICEServer) []protocol.ICEServerInfo {
 	return result
 }
 
+// ==================== 启动向导（零参数交互式） ====================
+
+// errWizardGenerateOnly：用户在向导里选择“仅生成启动脚本”，main 据此生成脚本后退出、不启动。
+var errWizardGenerateOnly = errors.New("wizard: generate script only")
+
+// runStartupWizard 在不带任何命令行参数启动时进入：依次收集信令地址、归属 token、
+// 名称、(可选)id、本地密码、终端选项与启动方式，把结果写回各 flag 变量，并按名称生成启动脚本。
+func runStartupWizard(id, name, ownerHash, password, sigURL, sigToken, termShell *string, termEnabled *bool) error {
+	in := bufio.NewReader(os.Stdin)
+	fmt.Println("============================================")
+	fmt.Println("  WebRTC PortMap Agent · 启动向导")
+	fmt.Println("  （未带任何参数启动；直接回车使用 [] 中默认值）")
+	fmt.Println("============================================")
+
+	*sigURL = promptDefault(in, "信令服务器地址 (signal)", *sigURL)
+	*sigToken = promptDefault(in, "信令 token (signal-token，无则留空)", "")
+	*ownerHash = promptRequired(in, "归属 token (owner-hash，从 Web 控制台“用户 hash”获取)")
+	*name = promptRequired(in, "Agent 名称 (agentname，同 owner 下同名即同一 agent)")
+	*id = promptDefault(in, "Agent ID (留空由服务器自动生成/规整)", "")
+	*password = promptSecret(in, "本地鉴权密码 (password)")
+
+	*termEnabled = promptYesNo(in, "启用内嵌远程终端 (terminal)？", false)
+	if *termEnabled {
+		*termShell = promptDefault(in, "终端 shell (powershell/pwsh/cmd/bash/sh，留空=平台默认)", "")
+	}
+
+	fmt.Println()
+	fmt.Println("启动方式：")
+	fmt.Println("  1) 立即启动（不生成脚本）")
+	fmt.Println("  2) 仅生成启动脚本")
+	fmt.Println("  3) 生成启动脚本并立即启动")
+	choice := promptDefault(in, "选择 [1/2/3]", "3")
+
+	if choice == "2" || choice == "3" {
+		path, err := writeStartupScript(*name, *id, *ownerHash, *password, *sigURL, *sigToken, *termEnabled, *termShell)
+		if err != nil {
+			return fmt.Errorf("生成启动脚本失败: %w", err)
+		}
+		fmt.Printf("\n[Wizard] 已生成启动脚本: %s\n", path)
+		fmt.Printf("[Wizard] ⚠️ 脚本含明文密码，请妥善保管并限制文件权限。\n")
+	}
+	if choice == "2" {
+		return errWizardGenerateOnly
+	}
+	fmt.Println()
+	return nil
+}
+
+func promptDefault(in *bufio.Reader, label, def string) string {
+	if def != "" {
+		fmt.Printf("%s [%s]: ", label, def)
+	} else {
+		fmt.Printf("%s: ", label)
+	}
+	line, _ := in.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def
+	}
+	return line
+}
+
+func promptRequired(in *bufio.Reader, label string) string {
+	for {
+		fmt.Printf("%s: ", label)
+		line, _ := in.ReadString('\n')
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+		fmt.Println("  * 此项必填，请重新输入。")
+	}
+}
+
+func promptSecret(in *bufio.Reader, label string) string {
+	for {
+		fmt.Printf("%s: ", label)
+		b, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		var s string
+		if err != nil {
+			// 非交互/重定向场景回退到可见输入
+			line, _ := in.ReadString('\n')
+			s = strings.TrimSpace(line)
+		} else {
+			s = strings.TrimSpace(string(b))
+		}
+		if s != "" {
+			return s
+		}
+		fmt.Println("  * 密码不能为空，请重新输入。")
+	}
+}
+
+func promptYesNo(in *bufio.Reader, label string, def bool) bool {
+	hint := "y/N"
+	if def {
+		hint = "Y/n"
+	}
+	fmt.Printf("%s [%s]: ", label, hint)
+	line, _ := in.ReadString('\n')
+	line = strings.ToLower(strings.TrimSpace(line))
+	if line == "" {
+		return def
+	}
+	return line == "y" || line == "yes"
+}
+
+// sanitizeFileToken 把名称规整为安全文件名片段。
+func sanitizeFileToken(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		out = "agent"
+	}
+	return out
+}
+
+func winQuote(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+func shQuote(s string) string  { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// writeStartupScript 在可执行文件所在目录生成 start-<name>.{bat,sh}，内容为带全部参数的启动命令。
+func writeStartupScript(name, id, ownerHash, password, sigURL, sigToken string, termEnabled bool, termShell string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil || strings.TrimSpace(exe) == "" {
+		exe = os.Args[0]
+	}
+	windows := runtime.GOOS == "windows"
+
+	type kv struct{ k, v string }
+	args := []kv{
+		{"-signal", sigURL},
+		{"-owner-hash", ownerHash},
+		{"-password", password},
+		{"-name", name},
+	}
+	if strings.TrimSpace(id) != "" {
+		args = append(args, kv{"-id", id})
+	}
+	if strings.TrimSpace(sigToken) != "" {
+		args = append(args, kv{"-signal-token", sigToken})
+	}
+
+	var sb strings.Builder
+	if windows {
+		sb.WriteString("@echo off\r\n")
+		sb.WriteString("REM Auto-generated by agent wizard for " + name + "\r\n")
+		sb.WriteString("REM 含明文密码，请妥善保管。\r\n")
+		sb.WriteString(winQuote(exe))
+		for _, a := range args {
+			sb.WriteString(" " + a.k + " " + winQuote(a.v))
+		}
+		if termEnabled {
+			sb.WriteString(" -terminal")
+			if strings.TrimSpace(termShell) != "" {
+				sb.WriteString(" -terminal-shell " + winQuote(termShell))
+			}
+		}
+		sb.WriteString("\r\n")
+	} else {
+		sb.WriteString("#!/bin/sh\n")
+		sb.WriteString("# Auto-generated by agent wizard for " + name + "\n")
+		sb.WriteString("# 含明文密码，请妥善保管（建议 chmod 600）。\n")
+		sb.WriteString("exec " + shQuote(exe))
+		for _, a := range args {
+			sb.WriteString(" " + a.k + " " + shQuote(a.v))
+		}
+		if termEnabled {
+			sb.WriteString(" -terminal")
+			if strings.TrimSpace(termShell) != "" {
+				sb.WriteString(" -terminal-shell " + shQuote(termShell))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	ext, perm := ".sh", os.FileMode(0700)
+	if windows {
+		ext, perm = ".bat", os.FileMode(0600)
+	}
+	dir := filepath.Dir(exe)
+	if dir == "" || dir == "." {
+		if wd, e := os.Getwd(); e == nil {
+			dir = wd
+		}
+	}
+	path := filepath.Join(dir, "start-"+sanitizeFileToken(name)+ext)
+	if err := os.WriteFile(path, []byte(sb.String()), perm); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func main() {
 	var (
-		id          = flag.String("id", "", "Agent ID (required)")
-		name        = flag.String("name", "", "Agent display name (optional, defaults to id)")
+		id          = flag.String("id", "", "Agent ID (optional; server auto-generates/uniquifies if empty or duplicate)")
+		name        = flag.String("name", "", "Agent display name (per-owner identity; defaults to id)")
 		ownerHash   = flag.String("owner-hash", "", "User hash from Web UI (required)")
 		password    = flag.String("password", "", "Local auth password (required)")
 		sigURL      = flag.String("signal", "http://localhost:8443", "Signaling server URL")
@@ -134,8 +339,20 @@ func main() {
 	)
 	flag.Parse()
 
-	if *id == "" || *ownerHash == "" || *password == "" {
-		fmt.Println("Usage: agent -id <agent_id> -owner-hash <user_hash> -password <password> [-name <display_name>] [-ports <ports.json>]")
+	// 零参数启动 → 进入交互式向导：依次收集连接/归属信息、终端选项、启动方式，
+	// 把结果写回各 flag 变量，并按 agentname 生成启动脚本。
+	if len(os.Args) == 1 {
+		if err := runStartupWizard(id, name, ownerHash, password, sigURL, sigToken, termShell, termEnabled); err != nil {
+			if errors.Is(err, errWizardGenerateOnly) {
+				return
+			}
+			fmt.Printf("[Agent] 向导退出: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if *ownerHash == "" || *password == "" {
+		fmt.Println("Usage: agent -owner-hash <user_hash> -password <password> [-id <agent_id>] [-name <display_name>] [-ports <ports.json>]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -202,7 +419,11 @@ func main() {
 	agent.tunnelMgr = tunnel.NewManager(agent)
 	agent.clientTunnel = tunnel.NewClientManager(agent)
 
-	fmt.Printf("[Agent] ID: %s\n", *id)
+	if strings.TrimSpace(*id) == "" {
+		fmt.Printf("[Agent] ID: (auto — assigned by server on register)\n")
+	} else {
+		fmt.Printf("[Agent] ID: %s\n", *id)
+	}
 	fmt.Printf("[Agent] Display Name: %s\n", displayName)
 	fmt.Printf("[Agent] Owner Hash: %s\n", *ownerHash)
 	fmt.Printf("[Agent] Configured ports: %d (allow_access=true only)\n", len(agent.ports))
@@ -302,15 +523,24 @@ func (a *Agent) register() error {
 	}
 
 	var result struct {
-		Token   string `json:"token"`
-		AgentID string `json:"agent_id"`
+		Token       string `json:"token"`
+		AgentID     string `json:"agent_id"`
+		DisplayName string `json:"display_name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("decode response failed: %w", err)
 	}
 
 	a.token = result.Token
-	fmt.Printf("[Agent] Registered successfully, token=%s\n", a.token[:8])
+	// 采用服务器分配/规整后的 agent_id：鉴权密钥由 password+id 两端各自派生，
+	// id 必须一致，否则控制端用列表里的权威 id 派生的密钥与本端不匹配、握手失败。
+	if result.AgentID != "" {
+		a.id = result.AgentID
+	}
+	if strings.TrimSpace(a.displayName) == "" {
+		a.displayName = result.DisplayName
+	}
+	fmt.Printf("[Agent] Registered successfully as id=%s name=%q token=%s\n", a.id, a.displayName, a.token[:8])
 	return nil
 }
 
