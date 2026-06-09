@@ -71,6 +71,9 @@ type Server struct {
 	agents               map[string]*AgentInfo
 	tokens               map[string]string
 
+	ipGuard          *ipGuard // 登录防爆破：同 IP 连续失败升级封禁
+	trustProxyHeader bool     // 是否采信 X-Forwarded-For / X-Real-IP（仅可信反代后开启）
+
 	turn TURNConfig // 内嵌 TURN 中转配置（含临时凭据签发参数）
 }
 
@@ -90,6 +93,7 @@ func NewServer(addr, authToken, webDir string, store *DataStore, emailVerifyEnab
 		smtpFrom:            smtpFrom,
 		agents:              make(map[string]*AgentInfo),
 		tokens:              make(map[string]string),
+		ipGuard:             newIPGuard(),
 	}
 }
 
@@ -102,6 +106,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/auth/send-code", s.withCORS(s.handleAuthSendCode))
 	mux.HandleFunc("/auth/register", s.withCORS(s.handleAuthRegister))
 	mux.HandleFunc("/auth/login", s.withCORS(s.handleAuthLogin))
+	mux.HandleFunc("/auth/login-by-hash", s.withCORS(s.handleClientLoginByHash))
 	mux.HandleFunc("/auth/me", s.withCORS(s.handleAuthMe))
 	mux.HandleFunc("/auth/change-password", s.withCORS(s.handleAuthChangePassword))
 	mux.HandleFunc("/agent/turn-credentials", s.withCORS(s.handleAgentTurnCredentials))
@@ -642,6 +647,11 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	ip := s.clientIP(r)
+	if blocked, remain := s.ipGuard.banned(ip); blocked {
+		writeRateLimited(w, remain)
+		return
+	}
 	var req struct {
 		TenantCode string `json:"tenant_code"`
 		Username   string `json:"username"`
@@ -656,6 +666,11 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user := s.dataStore.FindUser(req.TenantCode, req.Username)
 	if user == nil || !verifyPasswordHash(user.PasswordSalt, user.PasswordHash, req.Password) {
+		if banned, remain := s.ipGuard.recordFail(ip); banned {
+			fmt.Printf("[Signaling] IP %s banned for %s after repeated login failures\n", ip, remain.Round(time.Second))
+			writeRateLimited(w, remain)
+			return
+		}
 		http.Error(w, "invalid username or password", http.StatusUnauthorized)
 		return
 	}
@@ -668,6 +683,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.ipGuard.recordSuccess(ip)
 	writeJSON(w, map[string]interface{}{
 		"success":      true,
 		"token":        session.Token,
@@ -677,6 +693,66 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		"email":        user.Email,
 		"is_admin":     user.IsAdmin,
 		"expires_at":   session.ExpiresAt,
+	}, http.StatusOK)
+}
+
+// writeRateLimited 返回 429，并带 Retry-After（秒）。
+func writeRateLimited(w http.ResponseWriter, remain time.Duration) {
+	secs := int(remain.Seconds()) + 1
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
+	http.Error(w, fmt.Sprintf("too many failed attempts; try again in %s", remain.Round(time.Second)), http.StatusTooManyRequests)
+}
+
+// handleClientLoginByHash 用 user hash 做第一层身份换取 session token（client 免账户名/密码）。
+// 安全说明：持有 hash 即可枚举/尝试连接该用户名下 agent；真正访问仍受 agent 本地密码保护。
+func (s *Server) handleClientLoginByHash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := s.clientIP(r)
+	if blocked, remain := s.ipGuard.banned(ip); blocked {
+		writeRateLimited(w, remain)
+		return
+	}
+	var req struct {
+		UserHash string `json:"user_hash"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.UserHash) == "" {
+		http.Error(w, "Missing user_hash", http.StatusBadRequest)
+		return
+	}
+	user := s.dataStore.GetUserByHash(req.UserHash)
+	if user == nil {
+		if banned, remain := s.ipGuard.recordFail(ip); banned {
+			fmt.Printf("[Signaling] IP %s banned for %s after repeated login-by-hash failures\n", ip, remain.Round(time.Second))
+			writeRateLimited(w, remain)
+			return
+		}
+		http.Error(w, "invalid user hash", http.StatusUnauthorized)
+		return
+	}
+	if s.emailVerifyRequired && !user.EmailVerified {
+		http.Error(w, "email verification required", http.StatusForbidden)
+		return
+	}
+	session, err := s.dataStore.CreateSession(user, s.sessionTTL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.ipGuard.recordSuccess(ip)
+	writeJSON(w, map[string]interface{}{
+		"success":     true,
+		"token":       session.Token,
+		"user_hash":   user.UserHash,
+		"tenant_code": user.TenantCode,
+		"username":    user.Username,
+		"expires_at":  session.ExpiresAt,
 	}, http.StatusOK)
 }
 
@@ -1383,6 +1459,7 @@ func main() {
 		turnRealm            = flag.String("turn-realm", "webrtc-portmap", "TURN realm")
 		turnSecret           = flag.String("turn-secret", "", "TURN REST shared secret (auto-generated if empty)")
 		turnTTL              = flag.Duration("turn-ttl", 12*time.Hour, "TURN ephemeral credential TTL")
+		trustProxyHeader     = flag.Bool("trust-proxy-header", false, "Trust X-Forwarded-For/X-Real-IP for client IP (only enable when behind a trusted reverse proxy)")
 	)
 	flag.Parse()
 
@@ -1404,6 +1481,7 @@ func main() {
 	}
 
 	server := NewServer(*addr, *authToken, *webDir, store, *emailVerifyEnabled, *emailVerifyRequired, *sessionTTL, *smtpHost, *smtpPort, *smtpUser, *smtpPass, *smtpFrom)
+	server.trustProxyHeader = *trustProxyHeader
 	go server.cleanupLoop()
 
 	// 内嵌 TURN 中转服务（可选）。

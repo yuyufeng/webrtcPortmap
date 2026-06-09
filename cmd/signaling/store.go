@@ -568,6 +568,17 @@ func (ds *DataStore) GetSession(token string) (*UserSession, *UserRecord) {
 	return session, user
 }
 
+// GetUserByHash 按用户 hash 解析用户（用于 client 以 user hash 做第一层身份）。
+func (ds *DataStore) GetUserByHash(userHash string) *UserRecord {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+	userID := ds.data.UsersByHash[strings.TrimSpace(userHash)]
+	if userID == "" {
+		return nil
+	}
+	return ds.data.Users[userID]
+}
+
 // randomAgentID 生成随机 agent 内部句柄；调用方需在持锁下校验全局唯一。
 func randomAgentID() string {
 	b := make([]byte, 5)

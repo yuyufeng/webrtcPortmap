@@ -196,7 +196,10 @@ function updateCurrentUserUI() {
         setDownloadLink(clientDownloadURLMac, `${signalURL}/download/client/mac`);
     }
     if (agentStartCommand) {
-        agentStartCommand.value = `agent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -terminal\n`
+        agentStartCommand.value = `# Windows\n`
+            + `agent.exe -name \"我的客户端\" -owner-hash ${hash} -signal ${signalURL} -terminal -password <local_password>\n`
+            + `# Linux / macOS\n`
+            + `./agent -name \"我的客户端\" -owner-hash ${hash} -signal ${signalURL} -terminal -password <local_password>\n`
             + `# -name 为该 Agent 的标识（同名即同一 Agent）；agent_id 由服务器自动生成，无需手动指定\n`
             + `# -terminal 启用内嵌远程终端（断线重连自动回放，不重置）；可选 -terminal-shell powershell|cmd|bash|sh\n`
             + `# 直连失败会自动经服务器 TURN 中转（-use-server-turn 默认开）`;
@@ -229,11 +232,18 @@ function updateCurrentUserUI() {
         }, null, 2);
     }
     if (agentStartCommandWithPorts) {
-        agentStartCommandWithPorts.value = `agent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -ports ./ports.json -terminal\n`
+        agentStartCommandWithPorts.value = `# Windows\n`
+            + `agent.exe -name \"我的客户端\" -owner-hash ${hash} -signal ${signalURL} -ports ./ports.json -terminal -password <local_password>\n`
+            + `# Linux / macOS\n`
+            + `./agent -name \"我的客户端\" -owner-hash ${hash} -signal ${signalURL} -ports ./ports.json -terminal -password <local_password>\n`
             + `# -terminal 启用内嵌远程终端；-ports 指定端口映射配置；直连失败自动经服务器 TURN 中转`;
     }
     if (clientStartCommand) {
-        clientStartCommand.value = `client -signal ${signalURL} -username ${state.currentUser?.username || '<username>'} -user-password <password>\n# 默认进入交互模式：选择 Agent、输入本地密码、选择服务并指定本地端口`;
+        clientStartCommand.value = `# Windows\n`
+            + `client.exe -signal ${signalURL} -user-hash ${hash}\n`
+            + `# Linux / macOS\n`
+            + `./client -signal ${signalURL} -user-hash ${hash}\n`
+            + `# -user-hash 即第一层身份（免账户名/密码）；默认进入交互模式：选择 Agent、输入本地密码、选择服务并指定本地端口`;
     }
     updateLoginVisibility();
 }
@@ -644,10 +654,11 @@ function showClientCommands(agentId) {
     const agent = state.agentsById[agentId];
     if (!agent) return;
     const url = getSignalURL();
-    const user = (state.currentUser && state.currentUser.username) || '<username>';
+    const hash = (state.currentUser && state.currentUser.user_hash) || '<USER_HASH>';
     const id = agent.id;
     const name = agent.display_name || agent.id;
-    const base = (exe) => `${exe} -signal ${url} -username ${user} -user-password <USER_PASSWORD> -agent ${id} -agent-password <AGENT_PASSWORD>`;
+    // -user-hash 做第一层身份（免账户名/密码）；密码参数放最后，方便填。
+    const cmd = (exe, suffix) => `${exe} -signal ${url} -user-hash ${hash} -agent ${id}${suffix} -agent-password <AGENT_PASSWORD>`;
     const variants = [
         { title: '交互连接（连接后交互选择服务并指定本地端口）', suffix: '' },
         { title: '远程终端', suffix: ' -term' },
@@ -656,8 +667,8 @@ function showClientCommands(agentId) {
     const commands = [];
     let sectionsHTML = '';
     variants.forEach(v => {
-        const win = base('client.exe') + v.suffix;
-        const nix = base('./client') + v.suffix;
+        const win = cmd('client.exe', v.suffix);
+        const nix = cmd('./client', v.suffix);
         const iWin = commands.push({ cmd: win }) - 1;
         const iNix = commands.push({ cmd: nix }) - 1;
         sectionsHTML += `
@@ -677,7 +688,7 @@ function showClientCommands(agentId) {
             </div>
             <div style="font-size:13px;color:#475569;margin-bottom:4px;">Agent：<b>${escapeHtml(name)}</b></div>
             <p style="font-size:12.5px;color:#64748b;margin-bottom:16px;line-height:1.6;">
-                agent_id 已自动填好；把 <code>&lt;USER_PASSWORD&gt;</code>（你的登录密码）与 <code>&lt;AGENT_PASSWORD&gt;</code>（Agent 本地密码）替换为真实值即可。也可不带 <code>-agent</code> 直接运行 client 交互选择。
+                agent_id 与 user-hash 已自动填好（user-hash 即第一层身份，免账户名/密码）；只需把<b>末尾</b>的 <code>&lt;AGENT_PASSWORD&gt;</code>（Agent 本地密码，服务器不存、必须手填）替换为真实值即可。也可不带 <code>-agent</code> 直接运行 client 交互选择。
             </p>
             ${sectionsHTML}
         </div>`;

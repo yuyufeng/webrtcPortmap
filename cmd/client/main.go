@@ -118,6 +118,7 @@ type Client struct {
 	signalURL     string
 	username      string
 	userPassword  string
+	userHash      string
 	agentID       string
 	agentPassword string
 	sessionToken  string
@@ -149,6 +150,7 @@ func main() {
 		signalURL     = flag.String("signal", "http://localhost:8443", "Signaling server URL")
 		username      = flag.String("username", "", "Login username")
 		userPassword  = flag.String("user-password", "", "Login password")
+		userHash      = flag.String("user-hash", "", "Login via user hash (alternative to -username/-user-password)")
 		agentID       = flag.String("agent", "", "Agent ID to connect")
 		agentPassword = flag.String("agent-password", "", "Agent local auth password")
 		listOnly      = flag.Bool("list", false, "List my agents and exit")
@@ -163,8 +165,9 @@ func main() {
 	flag.Var(&mappings, "map", "Local port mapping in the form <local_addr>=<port_id>, e.g. 127.0.0.1:18080=http")
 	flag.Parse()
 
-	if *username == "" || *userPassword == "" {
-		fmt.Println("Usage:")
+	if *userHash == "" && (*username == "" || *userPassword == "") {
+		fmt.Println("Usage (账户名+密码，或 -user-hash 二选一):")
+		fmt.Println("  client -signal <url> -user-hash <hash> [-agent <agent_id> -agent-password <password> [-map ...|-term]]")
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass>")
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -list")
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -agent <agent_id> -agent-password <password> [-map 127.0.0.1:18080=http]")
@@ -176,6 +179,7 @@ func main() {
 		signalURL:     strings.TrimRight(*signalURL, "/"),
 		username:      *username,
 		userPassword:  *userPassword,
+		userHash:      *userHash,
 		agentID:       *agentID,
 		agentPassword: *agentPassword,
 		httpClient:    &http.Client{Timeout: 45 * time.Second},
@@ -196,8 +200,14 @@ func main() {
 	}
 	client.config.PrintICEServers()
 
-	if err := client.login(); err != nil {
-		fmt.Printf("[Client] Login failed: %v\n", err)
+	var loginErr error
+	if client.userHash != "" {
+		loginErr = client.loginByHash()
+	} else {
+		loginErr = client.login()
+	}
+	if loginErr != nil {
+		fmt.Printf("[Client] Login failed: %v\n", loginErr)
 		os.Exit(1)
 	}
 
@@ -349,6 +359,35 @@ func (c *Client) login() error {
 	}
 	c.sessionToken = result.Token
 	fmt.Printf("[Client] Login successful: %s\n", c.username)
+	return nil
+}
+
+// loginByHash 用 user hash 做第一层身份换取 session token（免账户名/密码）。
+func (c *Client) loginByHash() error {
+	body := map[string]string{"user_hash": c.userHash}
+	data, _ := json.Marshal(body)
+	resp, err := c.httpClient.Post(c.signalURL+"/auth/login-by-hash", "application/json", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var msg bytes.Buffer
+		_, _ = msg.ReadFrom(resp.Body)
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(msg.String()))
+	}
+	var result struct {
+		Token    string `json:"token"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	c.sessionToken = result.Token
+	if c.username == "" {
+		c.username = result.Username
+	}
+	fmt.Printf("[Client] Login (by hash) successful: %s\n", c.username)
 	return nil
 }
 
