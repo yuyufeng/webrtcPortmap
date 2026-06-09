@@ -196,7 +196,8 @@ function updateCurrentUserUI() {
         setDownloadLink(clientDownloadURLMac, `${signalURL}/download/client/mac`);
     }
     if (agentStartCommand) {
-        agentStartCommand.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -terminal\n`
+        agentStartCommand.value = `agent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -terminal\n`
+            + `# -name 为该 Agent 的标识（同名即同一 Agent）；agent_id 由服务器自动生成，无需手动指定\n`
             + `# -terminal 启用内嵌远程终端（断线重连自动回放，不重置）；可选 -terminal-shell powershell|cmd|bash|sh\n`
             + `# 直连失败会自动经服务器 TURN 中转（-use-server-turn 默认开）`;
     }
@@ -228,7 +229,7 @@ function updateCurrentUserUI() {
         }, null, 2);
     }
     if (agentStartCommandWithPorts) {
-        agentStartCommandWithPorts.value = `agent -id myagent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -ports ./ports.json -terminal\n`
+        agentStartCommandWithPorts.value = `agent -name \"我的客户端\" -owner-hash ${hash} -password <local_password> -signal ${signalURL} -ports ./ports.json -terminal\n`
             + `# -terminal 启用内嵌远程终端；-ports 指定端口映射配置；直连失败自动经服务器 TURN 中转`;
     }
     if (clientStartCommand) {
@@ -588,16 +589,105 @@ function renderAgentList(agents) {
         li.innerHTML = `
             <div class="agent-info">
                 <div class="agent-name">${agentName}</div>
-                <div class="agent-id">${escapeHtml(agent.id)}</div>
                 ${description}
                 <div class="agent-status ${onlineClass}">${statusText}</div>
             </div>
             <div class="agent-actions">
                 <button class="btn btn-primary" onclick="selectAgent('${escapeHtml(agent.id)}', '${agentName}')">连接</button>
+                <button class="btn btn-secondary" onclick="showClientCommands('${escapeHtml(agent.id)}')">📋 命令</button>
                 <button class="btn btn-danger" onclick="deleteAgent('${escapeHtml(agent.id)}', '${agentName}')">删除</button>
             </div>
         `;
         list.appendChild(li);
+    });
+}
+
+// ==================== client 连接命令复制 ====================
+
+function fallbackCopy(text, done) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    if (done) done();
+}
+
+function copyText(text, btn) {
+    const done = () => {
+        if (!btn) return;
+        const old = btn.textContent;
+        btn.textContent = '已复制';
+        setTimeout(() => { btn.textContent = old; }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    } else {
+        fallbackCopy(text, done);
+    }
+}
+
+function cmdRowHTML(label, cmd, idx) {
+    return `
+        <div style="display:flex;gap:8px;align-items:stretch;margin-bottom:8px;">
+            <div style="flex:0 0 92px;font-size:12px;color:#94a3b8;display:flex;align-items:center;">${label}</div>
+            <code style="flex:1;background:#0d1117;color:#c9d1d9;padding:9px 11px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-all;font-family:Consolas,monospace;">${escapeHtml(cmd)}</code>
+            <button class="btn btn-secondary" data-cmd-idx="${idx}" style="flex:0 0 auto;align-self:center;">复制</button>
+        </div>`;
+}
+
+// showClientCommands 弹出某 agent 的 client 连接命令（agent_id 自动填好，密码留占位）。
+function showClientCommands(agentId) {
+    const agent = state.agentsById[agentId];
+    if (!agent) return;
+    const url = getSignalURL();
+    const user = (state.currentUser && state.currentUser.username) || '<username>';
+    const id = agent.id;
+    const name = agent.display_name || agent.id;
+    const base = (exe) => `${exe} -signal ${url} -username ${user} -user-password <USER_PASSWORD> -agent ${id} -agent-password <AGENT_PASSWORD>`;
+    const variants = [
+        { title: '交互连接（连接后交互选择服务并指定本地端口）', suffix: '' },
+        { title: '远程终端', suffix: ' -term' },
+        { title: '端口映射示例（本地 18080 → 远端 http 服务）', suffix: ' -map 127.0.0.1:18080=http' },
+    ];
+    const commands = [];
+    let sectionsHTML = '';
+    variants.forEach(v => {
+        const win = base('client.exe') + v.suffix;
+        const nix = base('./client') + v.suffix;
+        const iWin = commands.push({ cmd: win }) - 1;
+        const iNix = commands.push({ cmd: nix }) - 1;
+        sectionsHTML += `
+            <div style="margin-bottom:16px;">
+                <div style="font-weight:600;font-size:14px;color:#334155;margin-bottom:8px;">${escapeHtml(v.title)}</div>
+                ${cmdRowHTML('Windows', win, iWin)}
+                ${cmdRowHTML('Linux/macOS', nix, iNix)}
+            </div>`;
+    });
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px;';
+    overlay.innerHTML = `
+        <div style="background:#fff;border-radius:10px;max-width:780px;width:100%;max-height:85vh;overflow:auto;padding:22px;box-shadow:0 20px 50px rgba(0,0,0,.3);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <h2 style="font-size:18px;color:#333;">复制 client 连接命令</h2>
+                <button class="btn btn-secondary" data-close="1" style="padding:4px 12px;">✕</button>
+            </div>
+            <div style="font-size:13px;color:#475569;margin-bottom:4px;">Agent：<b>${escapeHtml(name)}</b></div>
+            <p style="font-size:12.5px;color:#64748b;margin-bottom:16px;line-height:1.6;">
+                agent_id 已自动填好；把 <code>&lt;USER_PASSWORD&gt;</code>（你的登录密码）与 <code>&lt;AGENT_PASSWORD&gt;</code>（Agent 本地密码）替换为真实值即可。也可不带 <code>-agent</code> 直接运行 client 交互选择。
+            </p>
+            ${sectionsHTML}
+        </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    const closeBtn = overlay.querySelector('[data-close="1"]');
+    if (closeBtn) closeBtn.onclick = close;
+    overlay.querySelectorAll('[data-cmd-idx]').forEach(btn => {
+        btn.onclick = () => copyText(commands[parseInt(btn.getAttribute('data-cmd-idx'), 10)].cmd, btn);
     });
 }
 
@@ -609,7 +699,7 @@ function selectAgent(id, displayName) {
     const passwordInput = document.getElementById('agent-password');
     const status = document.getElementById('password-status');
     if (modalText) {
-        modalText.textContent = `${state.selectedAgentName} (${id})`;
+        modalText.textContent = state.selectedAgentName;
     }
     if (passwordInput) {
         passwordInput.value = '';
