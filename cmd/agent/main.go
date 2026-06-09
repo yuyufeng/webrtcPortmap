@@ -854,8 +854,10 @@ func (a *Agent) handleDataChannel() {
 		return
 	}
 	
-	// 在DataChannel可能收到消息前就初始化handshaker
-	a.handshaker = auth.NewHandshaker(a.password, a.id, false)
+	// 在DataChannel可能收到消息前就初始化handshaker。
+	// agent 作为「校验方」(initiator=true)：由 agent 出挑战、自己校验对端响应，
+	// 这样密码错误是 agent 可见事件、且对端拿不到可离线爆破的 HMAC。
+	a.handshaker = auth.NewHandshaker(a.password, a.id, true)
 	
 	if !a.peer.WaitForDataChannelOpen(30 * time.Second) {
 		fmt.Printf("[Agent] Data channel open timeout\n")
@@ -863,11 +865,20 @@ func (a *Agent) handleDataChannel() {
 		return
 	}
 
-	fmt.Printf("[Agent] Data channel opened, waiting for authentication...\n")
 	if a.authenticated {
 		fmt.Printf("[Agent] Data channel already authenticated, re-sending agent config\n")
 		a.sendAgentConfig()
+		return
 	}
+	// 通道就绪后主动下发挑战，等待对端用密码响应、由 agent 校验。
+	challengeMsg, err := a.handshaker.CreateChallenge()
+	if err != nil {
+		fmt.Printf("[Agent] Failed to create challenge: %v\n", err)
+		a.cleanup()
+		return
+	}
+	a.sendMessage(challengeMsg)
+	fmt.Printf("[Agent] Data channel opened, challenge sent, waiting for response...\n")
 }
 
 // handleMessage 处理接收到的消息
@@ -882,7 +893,7 @@ func (a *Agent) handleMessage(data []byte) {
 
 	// 鉴权消息始终优先处理，避免旧 authenticated 状态把新的 challenge 当成普通消息吞掉。
 	switch msg.Type {
-	case protocol.MsgTypeAuthChallenge, protocol.MsgTypeAuthResult:
+	case protocol.MsgTypeAuthResponse:
 		a.handleAuthMessage(data)
 		return
 	}
@@ -955,18 +966,14 @@ func (a *Agent) handleAuthMessage(data []byte) {
 	}
 
 	switch msg.Type {
-	case protocol.MsgTypeAuthChallenge:
-		resp, err := a.handshaker.HandleChallenge(&msg)
-		if err != nil {
-			fmt.Printf("[Agent] Handle challenge failed: %v\n", err)
-			a.cleanup()
-			return
+	case protocol.MsgTypeAuthResponse:
+		// agent 校验对端响应：匹配则成功，否则视为密码错误、断开。
+		resultMsg, err := a.handshaker.HandleResponse(&msg)
+		if resultMsg != nil {
+			a.sendMessage(resultMsg) // 把结果（成功/失败）回给对端
 		}
-		a.sendMessage(resp)
-
-	case protocol.MsgTypeAuthResult:
-		if err := a.handshaker.HandleResult(&msg); err != nil {
-			fmt.Printf("[Agent] Authentication failed: %v\n", err)
+		if err != nil {
+			fmt.Printf("[Agent] Authentication failed (wrong password): %v\n", err)
 			a.cleanup()
 			return
 		}

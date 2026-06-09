@@ -433,7 +433,9 @@ func (c *Client) connect() error {
 		return err
 	}
 	c.peer = peer
-	c.handshaker = auth.NewHandshaker(c.agentPassword, c.agentID, true)
+	// 客户端作为「响应方」(initiator=false)：等待 agent 下发挑战、用密码计算响应，
+	// 由 agent 校验。密码正确与否的判定在 agent 侧（见 agent 的反向挑战）。
+	c.handshaker = auth.NewHandshaker(c.agentPassword, c.agentID, false)
 
 	peer.SetOnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
@@ -452,10 +454,7 @@ func (c *Client) connect() error {
 		c.handleMessage(data)
 	})
 	peer.SetOnDataChannelOpen(func() {
-		fmt.Printf("[Client] Data channel opened, starting authentication...\n")
-		if err := c.startAuthentication(); err != nil {
-			fmt.Printf("[Client] Authentication start failed: %v\n", err)
-		}
+		fmt.Printf("[Client] Data channel opened, waiting for agent authentication challenge...\n")
 	})
 
 	offer, err := peer.CreateOffer()
@@ -578,14 +577,6 @@ func (c *Client) sendSignalingMessage(msg *SignalMessage) error {
 	return c.signalConn.WriteJSON(msg)
 }
 
-func (c *Client) startAuthentication() error {
-	msg, err := c.handshaker.CreateChallenge()
-	if err != nil {
-		return err
-	}
-	return c.sendMessage(msg)
-}
-
 func (c *Client) handleMessage(data []byte) {
 	var msg protocol.Message
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -661,13 +652,17 @@ func (c *Client) handleMessage(data []byte) {
 
 func (c *Client) handleAuthMessage(msg *protocol.Message) {
 	switch msg.Type {
-	case protocol.MsgTypeAuthResponse:
-		resultMsg, err := c.handshaker.HandleResponse(msg)
-		if resultMsg != nil {
-			_ = c.sendMessage(resultMsg)
-		}
+	case protocol.MsgTypeAuthChallenge:
+		// 收到 agent 的挑战 → 用密码计算响应回去，等待 agent 的结果。
+		respMsg, err := c.handshaker.HandleChallenge(msg)
 		if err != nil {
-			fmt.Printf("[Client] Authentication failed: %v\n", err)
+			fmt.Printf("[Client] Handle challenge failed: %v\n", err)
+			return
+		}
+		_ = c.sendMessage(respMsg)
+	case protocol.MsgTypeAuthResult:
+		if err := c.handshaker.HandleResult(msg); err != nil {
+			fmt.Printf("[Client] Authentication failed (wrong agent password?): %v\n", err)
 			return
 		}
 		c.authenticated = c.handshaker.IsAuthenticated()

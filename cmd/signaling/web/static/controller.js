@@ -935,8 +935,7 @@ function createDataChannel() {
     state.dataChannel = state.pc.createDataChannel('portmap', { ordered: true });
     
     state.dataChannel.onopen = () => {
-        log('DataChannel已打开，开始鉴权...');
-        startAuthentication();
+        log('DataChannel已打开，等待 Agent 鉴权挑战...');
     };
     
     state.dataChannel.onclose = () => {
@@ -1054,35 +1053,34 @@ async function handleDataChannelMessage(data) {
     try {
         const msg = JSON.parse(data);
         
-        if (msg.type === 2) {
-            const payload = msg.payload;
-            
-            let expectedResponse;
+        if (msg.type === 1) {
+            // 收到 Agent 的挑战 → 用密码计算响应回去，由 Agent 校验。
+            const { challenge, timestamp } = msg.payload || {};
             try {
-                expectedResponse = await computeAuthResponse();
+                state.derivedKey = await deriveKey(state.agentPassword, state.agentID);
             } catch (err) {
-                log(`计算响应失败: ${err.message}`, 'error');
+                log(`密钥派生失败: ${err.message}`, 'error');
+                showStatus('password-status', '鉴权失败: 密钥派生错误', 'error');
                 return;
             }
-            
-            if (payload.response === expectedResponse) {
-                sendProtocolMessage({
-                    type: 3,
-                    payload: { success: true, message: 'Authentication successful' }
-                });
-                
+            const response = portableHash256(`resp|${state.derivedKey}|${challenge}|${timestamp}`);
+            sendProtocolMessage({ type: 2, payload: { response, timestamp: Date.now() } });
+            log('已响应鉴权挑战，等待结果...');
+        } else if (msg.type === 3) {
+            // Agent 的校验结果
+            if (msg.payload && msg.payload.success) {
                 state.authenticated = true;
                 state.connecting = false;
                 log('鉴权成功！');
                 showStatus('password-status', '已连接并鉴权成功', 'success');
                 document.body.classList.add('connected-mode');
-                
                 document.getElementById('config-card')?.classList.add('hidden');
                 document.getElementById('agents-card')?.classList.add('hidden');
                 closeConnectModal();
                 document.getElementById('http-console-card')?.classList.remove('hidden');
             } else {
-                log('鉴权失败: 响应不匹配', 'error');
+                state.connecting = false;
+                log('鉴权失败: 密码错误', 'error');
                 showStatus('password-status', '鉴权失败: 密码错误', 'error');
             }
         } else if (msg.type === 14) {
