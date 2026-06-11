@@ -446,6 +446,10 @@ function renderAdminUsers(users) {
     if (!tb) return;
     const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     if (!users.length) { tb.innerHTML = '<tr><td colspan="6" style="padding:8px;color:#888;">暂无用户</td></tr>'; return; }
+    // 缓存用户信息，供重置密码/删除时取用户名做提示。
+    state.adminUsersById = {};
+    users.forEach(u => { state.adminUsersById[u.user_id] = u; });
+    const selfName = state.currentUser && state.currentUser.username;
     tb.innerHTML = users.map(u => {
         const gb = u.monthly_quota_bytes ? bytesToGB(u.monthly_quota_bytes).toFixed(2) : '0';
         const mbps = u.max_bps ? bytesPerSecToMbps(u.max_bps).toFixed(2) : '0';
@@ -453,6 +457,7 @@ function renderAdminUsers(users) {
         const exhausted = u.exhausted ? ' <span style="color:#c00;">(已用满)</span>' : '';
         const adminTag = u.is_admin ? ' 👑' : '';
         const id = esc(u.user_id);
+        const isSelf = u.username === selfName;
         return `<tr style="border-bottom:1px solid #eee;">
             <td style="padding:6px;">${esc(u.username)}${adminTag}</td>
             <td style="padding:6px;">${esc(u.email)}</td>
@@ -462,6 +467,8 @@ function renderAdminUsers(users) {
             <td style="padding:6px;white-space:nowrap;">
                 <button class="btn btn-secondary" onclick="saveUserQuota('${id}')">保存</button>
                 <button class="btn btn-secondary" onclick="resetUserUsage('${id}')">清零用量</button>
+                <button class="btn btn-secondary" onclick="adminResetPassword('${id}')">重置密码</button>
+                ${isSelf ? '<span style="color:#94a3b8;font-size:12px;">（当前账号）</span>' : `<button class="btn btn-danger" onclick="adminDeleteUser('${id}')">删除</button>`}
             </td>
         </tr>`;
     }).join('');
@@ -496,6 +503,42 @@ async function resetUserUsage(userId) {
         loadAdminUsers();
     } catch (err) {
         log(`清零失败: ${err.message}`, 'error');
+    }
+}
+
+async function adminResetPassword(userId) {
+    const u = (state.adminUsersById && state.adminUsersById[userId]) || {};
+    const np = window.prompt(`为用户「${u.username || userId}」设置新密码（至少 1 位）：`, '');
+    if (np == null) return;            // 取消
+    if (!String(np).trim()) { log('新密码不能为空', 'error'); return; }
+    try {
+        const resp = await fetch(`${getSignalURL()}/admin/users/reset-password`, {
+            method: 'POST',
+            headers: buildJSONHeaders(true),
+            body: JSON.stringify({ user_id: userId, new_password: np })
+        });
+        if (!resp.ok) { log(`重置密码失败: ${await resp.text()}`, 'error'); return; }
+        log(`已重置用户「${u.username || userId}」的密码`);
+    } catch (err) {
+        log(`重置密码失败: ${err.message}`, 'error');
+    }
+}
+
+async function adminDeleteUser(userId) {
+    const u = (state.adminUsersById && state.adminUsersById[userId]) || {};
+    if (!window.confirm(`确定删除用户「${u.username || userId}」？\n该用户的登录会话与其名下 Agent 注册会一并删除，不可恢复。`)) return;
+    try {
+        const resp = await fetch(`${getSignalURL()}/admin/users/delete`, {
+            method: 'POST',
+            headers: buildJSONHeaders(true),
+            body: JSON.stringify({ user_id: userId })
+        });
+        if (!resp.ok) { log(`删除失败: ${await resp.text()}`, 'error'); return; }
+        const d = await resp.json().catch(() => ({}));
+        log(`已删除用户「${u.username || userId}」（同时移除 ${d.removed_agents || 0} 个 Agent）`);
+        loadAdminUsers();
+    } catch (err) {
+        log(`删除失败: ${err.message}`, 'error');
     }
 }
 

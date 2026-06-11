@@ -114,6 +114,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/admin/users", s.withCORS(s.handleAdminUsers))
 	mux.HandleFunc("/admin/users/quota", s.withCORS(s.handleAdminSetQuota))
 	mux.HandleFunc("/admin/users/reset-usage", s.withCORS(s.handleAdminResetUsage))
+	mux.HandleFunc("/admin/users/reset-password", s.withCORS(s.handleAdminResetPassword))
+	mux.HandleFunc("/admin/users/delete", s.withCORS(s.handleAdminDeleteUser))
 	mux.HandleFunc("/controller/list", s.withCORS(s.handleControllerList))
 	mux.HandleFunc("/controller/agent/delete", s.withCORS(s.handleControllerAgentDelete))
 	mux.HandleFunc("/controller/agents/register", s.withCORS(s.handleControllerAgentRegister))
@@ -488,6 +490,79 @@ func (s *Server) handleAdminResetUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]interface{}{"success": true}, http.StatusOK)
+}
+
+// handleAdminResetPassword POST /admin/users/reset-password {user_id, new_password}
+func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
+	_, admin, err := s.requireAdmin(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	var req struct {
+		UserID      string `json:"user_id"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.NewPassword) == "" {
+		http.Error(w, "new_password is required", http.StatusBadRequest)
+		return
+	}
+	target := s.dataStore.GetUserByID(req.UserID)
+	if target == nil || target.TenantCode != admin.TenantCode {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if err := s.dataStore.AdminResetUserPassword(req.UserID, req.NewPassword); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"success": true}, http.StatusOK)
+}
+
+// handleAdminDeleteUser POST /admin/users/delete {user_id}
+func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	_, admin, err := s.requireAdmin(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	target := s.dataStore.GetUserByID(req.UserID)
+	if target == nil || target.TenantCode != admin.TenantCode {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if target.ID == admin.ID {
+		http.Error(w, "不能删除自己", http.StatusBadRequest)
+		return
+	}
+	removedAgents, err := s.dataStore.DeleteUser(req.UserID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// 清理内存中被删用户的在线 agent 状态（注册数据已在 store 删除）。
+	s.mu.Lock()
+	for _, agentID := range removedAgents {
+		delete(s.agents, agentID)
+		for tok, aid := range s.tokens {
+			if aid == agentID {
+				delete(s.tokens, tok)
+			}
+		}
+	}
+	s.mu.Unlock()
+	writeJSON(w, map[string]interface{}{"success": true, "removed_agents": len(removedAgents)}, http.StatusOK)
 }
 
 // handleAgentTurnCredentials —— agent 用其 token 拉取内嵌 TURN 临时凭据（归属到 owner 用户）。

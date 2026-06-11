@@ -486,6 +486,55 @@ func (ds *DataStore) ApplyAdmins(adminKeys []string, defaultTenant string) []str
 	return matched
 }
 
+// AdminResetUserPassword 管理员重置某用户密码（不校验旧密码）。
+func (ds *DataStore) AdminResetUserPassword(userID, newPassword string) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	user := ds.data.Users[userID]
+	if user == nil {
+		return fmt.Errorf("user not found")
+	}
+	if strings.TrimSpace(newPassword) == "" {
+		return fmt.Errorf("new password is required")
+	}
+	salt, hash := newPasswordHash(newPassword)
+	user.PasswordSalt = salt
+	user.PasswordHash = hash
+	return ds.saveLocked()
+}
+
+// DeleteUser 删除用户及其关联数据（用户索引、会话、归属的 agent 注册）。
+// 返回被一并删除的 agent_id 列表，供调用方清理内存中的在线 agent 状态。
+func (ds *DataStore) DeleteUser(userID string) ([]string, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	user := ds.data.Users[userID]
+	if user == nil {
+		return nil, fmt.Errorf("user not found")
+	}
+	delete(ds.data.UsersByTenantName, tenantUserKey(user.TenantCode, user.Username))
+	delete(ds.data.UsersByHash, user.UserHash)
+	delete(ds.data.Users, userID)
+	// 该用户的登录会话
+	for token, sess := range ds.data.Sessions {
+		if sess != nil && sess.UserID == userID {
+			delete(ds.data.Sessions, token)
+		}
+	}
+	// 该用户归属的 agent 注册
+	var removedAgents []string
+	for agentID, rec := range ds.data.Agents {
+		if rec != nil && rec.OwnerUserID == userID {
+			removedAgents = append(removedAgents, agentID)
+			delete(ds.data.Agents, agentID)
+		}
+	}
+	if err := ds.saveLocked(); err != nil {
+		return removedAgents, err
+	}
+	return removedAgents, nil
+}
+
 func (ds *DataStore) MarkEmailVerified(email string) error {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
