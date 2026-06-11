@@ -613,6 +613,105 @@ async function listAgents() {
     }
 }
 
+// ==================== Agent 凭据缓存（cookie，base64） ====================
+// 把某 agent 的本地密码以 base64 存入 cookie，减少重复输入。
+// 注意：base64 仅为编码非加密；凭据存在浏览器 cookie 中，请在可信设备上使用。
+const AGENT_CRED_COOKIE = 'wp_agent_creds';
+
+function setRawCookie(name, value, days) {
+    const exp = new Date(Date.now() + days * 86400000).toUTCString();
+    document.cookie = `${name}=${encodeURIComponent(value)}; expires=${exp}; path=/; SameSite=Lax`;
+}
+function getRawCookie(name) {
+    const m = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : null;
+}
+function getAgentCredMap() {
+    try { return JSON.parse(getRawCookie(AGENT_CRED_COOKIE) || '{}') || {}; } catch (e) { return {}; }
+}
+function hasSavedAgentPassword(agentId) {
+    return !!getAgentCredMap()[agentId];
+}
+function getSavedAgentPassword(agentId) {
+    const b64 = getAgentCredMap()[agentId];
+    if (!b64) return null;
+    try { return decodeBase64Utf8(b64); } catch (e) { return null; }
+}
+function saveAgentPassword(agentId, password) {
+    if (!agentId || !password) return;
+    const map = getAgentCredMap();
+    map[agentId] = utf8ToBase64(password); // base64 保存
+    setRawCookie(AGENT_CRED_COOKIE, JSON.stringify(map), 30);
+}
+function clearAgentPassword(agentId) {
+    const map = getAgentCredMap();
+    if (map[agentId] !== undefined) {
+        delete map[agentId];
+        setRawCookie(AGENT_CRED_COOKIE, JSON.stringify(map), 30);
+    }
+}
+
+// connectWithSavedCred 用 cookie 里已存的凭据直接连接（无需弹窗输入密码）。
+function connectWithSavedCred(agentId) {
+    const agent = state.agentsById[agentId];
+    const name = agent ? (agent.display_name || agent.id) : agentId;
+    const pwd = getSavedAgentPassword(agentId);
+    if (!pwd) { selectAgent(agentId, name); return; } // 兜底：无凭据则走输入弹窗
+    state.agentID = agentId;
+    state.selectedAgentName = name;
+    state.selectedAgent = agent || null;
+    const pi = document.getElementById('agent-password');
+    if (pi) pi.value = pwd; // connect() 从该输入框读取密码
+    log(`使用已保存凭据连接 ${name}`);
+    connect();
+}
+
+// toggleCredMenu 展开/收起某 agent 连接按钮右侧的下拉菜单。
+function toggleCredMenu(ev, agentId) {
+    if (ev) ev.stopPropagation();
+    const menu = document.getElementById('cred-menu-' + agentId);
+    if (!menu) return;
+    const willShow = menu.classList.contains('hidden');
+    document.querySelectorAll('[id^="cred-menu-"]').forEach(m => m.classList.add('hidden'));
+    if (willShow) {
+        menu.classList.remove('hidden');
+        setTimeout(() => document.addEventListener('click', closeAllCredMenus, { once: true }), 0);
+    }
+}
+function closeAllCredMenus() {
+    document.querySelectorAll('[id^="cred-menu-"]').forEach(m => m.classList.add('hidden'));
+}
+
+// reenterCred 「重新输入凭据」：打开输入弹窗重新输入（成功后覆盖旧凭据；取消则保留）。
+function reenterCred(agentId) {
+    closeAllCredMenus();
+    const agent = state.agentsById[agentId];
+    selectAgent(agentId, agent ? (agent.display_name || agent.id) : agentId);
+}
+
+// connectViaModal 打开输入密码弹窗连接（无凭据时使用）。
+function connectViaModal(agentId) {
+    const agent = state.agentsById[agentId];
+    selectAgent(agentId, agent ? (agent.display_name || agent.id) : agentId);
+}
+
+// connectButtonHTML 根据是否已存凭据，返回连接按钮的 HTML。
+// 有凭据：「已有凭据连接」+ 右侧下拉（重新输入凭据）；无凭据：「输入密码连接」。
+function connectButtonHTML(agentId) {
+    const id = escapeHtml(agentId);
+    if (hasSavedAgentPassword(agentId)) {
+        return `
+            <div class="connect-split" style="flex:1 1 0;display:flex;position:relative;min-width:0;">
+                <button class="btn btn-primary" style="flex:1;min-width:0;border-top-right-radius:0;border-bottom-right-radius:0;" title="使用已保存的本地密码连接" onclick="connectWithSavedCred('${id}')">已有凭据连接</button>
+                <button class="btn btn-primary" style="flex:0 0 auto;padding:10px 9px;border-left:1px solid rgba(255,255,255,.4);border-top-left-radius:0;border-bottom-left-radius:0;" title="更多" onclick="toggleCredMenu(event,'${id}')">▾</button>
+                <div id="cred-menu-${id}" class="hidden" style="position:absolute;top:calc(100% + 4px);right:0;background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:60;overflow:hidden;min-width:150px;">
+                    <a href="javascript:void(0)" onclick="reenterCred('${id}')" style="display:block;padding:9px 14px;font-size:13px;color:#334155;text-decoration:none;white-space:nowrap;">重新输入凭据</a>
+                </div>
+            </div>`;
+    }
+    return `<button class="btn btn-primary" onclick="connectViaModal('${id}')">输入密码连接</button>`;
+}
+
 function renderAgentList(agents) {
     const list = document.getElementById('agent-list');
     const registerDetails = document.getElementById('agent-register-details');
@@ -646,7 +745,7 @@ function renderAgentList(agents) {
                 <div class="agent-status ${onlineClass}">${statusText}</div>
             </div>
             <div class="agent-actions">
-                <button class="btn btn-primary" onclick="selectAgent('${escapeHtml(agent.id)}', '${agentName}')">连接</button>
+                ${connectButtonHTML(agent.id)}
                 <button class="btn btn-secondary" onclick="showClientCommands('${escapeHtml(agent.id)}')">📋 命令</button>
                 <button class="btn btn-danger" onclick="deleteAgent('${escapeHtml(agent.id)}', '${agentName}')">删除</button>
             </div>
@@ -1138,6 +1237,8 @@ async function handleDataChannelMessage(data) {
             if (msg.payload && msg.payload.success) {
                 state.authenticated = true;
                 state.connecting = false;
+                // 鉴权成功后把本次使用的本地密码以 base64 存入 cookie，下次可一键连接。
+                saveAgentPassword(state.agentID, state.agentPassword);
                 log('鉴权成功！');
                 showStatus('password-status', '已连接并鉴权成功', 'success');
                 document.body.classList.add('connected-mode');
@@ -1147,8 +1248,10 @@ async function handleDataChannelMessage(data) {
                 document.getElementById('http-console-card')?.classList.remove('hidden');
             } else {
                 state.connecting = false;
+                // 密码错误：清掉可能已保存的旧凭据，下次需重新输入。
+                clearAgentPassword(state.agentID);
                 log('鉴权失败: 密码错误', 'error');
-                showStatus('password-status', '鉴权失败: 密码错误', 'error');
+                showStatus('password-status', '鉴权失败: 密码错误（已保存的凭据若有误已清除，请重新输入）', 'error');
             }
         } else if (msg.type === 14) {
             log(`收到Agent配置消息`);
