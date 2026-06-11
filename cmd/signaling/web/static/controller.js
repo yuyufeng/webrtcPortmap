@@ -1066,8 +1066,10 @@ async function createPeerConnection() {
             // disconnected 是可恢复的瞬态（relay 切换/短暂丢包都会经过它），
             // 不立刻拆连接，给 ICE 自愈或回退到 TURN 中转的机会；真失败会进入 failed。
             showStatus('password-status', 'WebRTC连接中断，尝试恢复中...', 'error');
+            notifyPopupLost('网络中断，尝试恢复中…');
         } else if (state.pc.connectionState === 'failed' || state.pc.connectionState === 'closed') {
             showStatus('password-status', 'WebRTC连接断开', 'error');
+            notifyPopupLost('WebRTC 连接断开');
             disconnect();
         }
     };
@@ -1093,6 +1095,7 @@ function createDataChannel() {
     
     state.dataChannel.onclose = () => {
         log('DataChannel已关闭');
+        notifyPopupLost('数据通道已关闭');
     };
     
     state.dataChannel.onmessage = (event) => {
@@ -2913,6 +2916,13 @@ window.wpPopupClosed = function () {
 };
 window.openTerminalPopup = openTerminalPopup;
 
+// notifyPopupLost 在连接丢失时通知独立终端新窗口（显示明确断连提示）。
+function notifyPopupLost(reason) {
+    if (popupTerminalActive() && typeof state.termPopup.wpConnectionLost === 'function') {
+        try { state.termPopup.wpConnectionLost(reason || ''); } catch (e) {}
+    }
+}
+
 function killTerminal() {
     sendProtocolMessage({ type: 29, payload: {} }); // TermClose
     state.termOpen = false;
@@ -2957,7 +2967,13 @@ function handleTermData(payload) {
 function handleTermExit(payload) {
     const code = payload ? payload.code : 0;
     const msg = (payload && payload.message) ? payload.message : 'shell exited';
-    if (state.term) state.term.write(`\r\n[终端退出 code=${code}] ${msg}\r\n`);
+    const line = `\r\n[终端退出 code=${code}] ${msg}\r\n`;
+    if (popupTerminalActive() && state.termPopup.wpWrite) {
+        try { state.termPopup.wpWrite(btoa(unescape(encodeURIComponent(line)))); } catch (e) {}
+    } else if (state.term) {
+        state.term.write(line);
+    }
+    notifyPopupLost(`远端 shell 已退出 (code=${code})`);
     state.termOpen = false;
     setTermStatus(`已退出 (code=${code})`);
 }
@@ -2969,6 +2985,7 @@ window.toggleTerminalMaximize = toggleTerminalMaximize;
 
 // ==================== 断开连接 ====================
 function disconnect() {
+    notifyPopupLost('已断开与 Agent 的连接');
     if (state.userSessionToken && state.agentID) {
         fetch(`${getSignalURL()}/controller/disconnect`, {
             method: 'POST',

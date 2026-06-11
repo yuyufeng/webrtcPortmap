@@ -9,12 +9,22 @@
     <script src="vendor/xterm-addon-fit.min.js"></script>
     <style>
         html, body { margin: 0; height: 100%; background: #1e1e1e; overflow: hidden; }
-        #host { height: 100vh; padding: 4px; box-sizing: border-box; }
+        #host { position: absolute; top: 0; left: 0; right: 0; bottom: 0; padding: 4px; box-sizing: border-box; }
+        #host.with-banner { top: 34px; }
         #notice { color: #ddd; font-family: -apple-system, sans-serif; padding: 24px; line-height: 1.7; }
         #notice code { background: #333; padding: 2px 6px; border-radius: 4px; }
+        #banner {
+            display: none; position: absolute; top: 0; left: 0; right: 0; height: 34px;
+            align-items: center; gap: 8px; padding: 0 12px;
+            background: #b3261e; color: #fff; font: 13px/34px -apple-system, sans-serif;
+            box-sizing: border-box; z-index: 10;
+        }
+        #banner.show { display: flex; }
+        #banner .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; flex: 0 0 auto; }
     </style>
 </head>
 <body>
+    <div id="banner"><span class="dot"></span><span id="banner-text"></span></div>
     <div id="host"></div>
     <script>
     (function () {
@@ -42,8 +52,27 @@
         function doFit() { if (fit) { try { fit.fit(); } catch (e) {} } }
         doFit();
 
-        // ===== opener -> 本窗口：写入输出 / 清屏（回放） =====
+        // ===== 断连横幅 =====
+        var banner = document.getElementById('banner');
+        var bannerText = document.getElementById('banner-text');
+        var host = document.getElementById('host');
+        function showBanner(msg) {
+            bannerText.textContent = msg || '连接已断开';
+            banner.classList.add('show');
+            host.classList.add('with-banner');
+            try { document.title = '⚠ 已断开 - 远程终端'; } catch (e) {}
+            doFit();
+        }
+        function hideBanner() {
+            if (!banner.classList.contains('show')) return;
+            banner.classList.remove('show');
+            host.classList.remove('with-banner');
+            doFit();
+        }
+
+        // ===== opener -> 本窗口：写入输出 / 清屏（回放） / 断连提示 =====
         window.wpWrite = function (b64) {
+            hideBanner(); // 有新数据 = 连接正常，撤掉断连提示
             try {
                 var bin = atob(b64);
                 var arr = new Uint8Array(bin.length);
@@ -51,14 +80,26 @@
                 term.write(arr);
             } catch (e) {}
         };
-        window.wpReset = function () { try { term.reset(); } catch (e) {} };
+        window.wpReset = function () { hideBanner(); try { term.reset(); } catch (e) {} };
         window.wpSetTitle = function (t) { try { document.title = t; } catch (e) {} };
+        // opener 通知连接丢失：顶部红色横幅 + 终端内明确提示。
+        window.wpConnectionLost = function (msg) {
+            showBanner('⚠ 连接已断开' + (msg ? '：' + msg : '') + ' —— 回主控制台重新连接后本窗口会自动恢复');
+            try { term.write('\r\n\x1b[1;31m── 连接已断开' + (msg ? '（' + msg + '）' : '') + ' ──\x1b[0m\r\n\x1b[33m请回到主控制台重新连接，连接恢复后本窗口会自动回放并继续。\x1b[0m\r\n'); } catch (e) {}
+        };
 
         // ===== 本窗口 -> opener：键盘输入 / 尺寸 / 关闭 =====
         term.onData(function (d) { try { opener.wpPopupInput(d); } catch (e) {} });
         function reportResize() { doFit(); try { opener.wpPopupResize(term.cols, term.rows); } catch (e) {} }
         window.addEventListener('resize', reportResize);
         window.addEventListener('beforeunload', function () { try { opener.wpPopupClosed(); } catch (e) {} });
+
+        // 主窗口（opener）关闭检测：主窗口没了就无法再通信，明确提示。
+        setInterval(function () {
+            if (!window.opener || window.opener.closed) {
+                showBanner('⚠ 主控制台窗口已关闭，连接中断 —— 请重新打开主控制台');
+            }
+        }, 2000);
 
         // 就绪：通知 opener，触发回放并把输出路由到本窗口
         try { opener.wpPopupReady(term.cols, term.rows); } catch (e) {}
