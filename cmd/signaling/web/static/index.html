@@ -816,10 +816,11 @@ Accept: text/html,application/xhtml+xml</textarea>
 
         <div class="card hidden" id="terminal-card">
             <h2>🖥️ 远程终端</h2>
-            <div class="toolbar-note">独享一个持久 shell 会话；断开重连不会重置，自动回放历史输出。点击后在<b>浮动窗口</b>中打开，提供更大显示空间（可拖动、缩放、最大化）。</div>
+            <div class="toolbar-note">独享一个持久 shell 会话；断开重连不会重置，自动回放历史输出。可在<b>页内浮动窗口</b>打开，或<b>独立新窗口</b>打开（界面更干净、无主页面干扰，可拖到别的显示器）。</div>
             <div class="compact-toolbar" style="margin-bottom:10px;">
                 <div class="toolbar-actions">
                     <button class="btn btn-primary" id="term-open-btn" onclick="openTerminal()">打开终端</button>
+                    <button class="btn btn-secondary" id="term-popup-btn" onclick="openTerminalPopup()">🗗 新窗口终端</button>
                     <span id="term-card-status" style="margin-left:10px;color:#666;"></span>
                 </div>
             </div>
@@ -935,12 +936,13 @@ Accept: text/html,application/xhtml+xml</textarea>
             <span id="term-status" class="terminal-float-status"></span>
             <span class="terminal-float-spacer"></span>
             <button class="tf-btn tf-danger" id="term-kill-btn" onclick="killTerminal()" title="结束远端 shell 会话">结束会话</button>
+            <button class="tf-btn" onclick="openTerminalPopup()" title="转到独立新窗口（界面更干净）">🗗 新窗口</button>
             <button class="tf-btn" id="term-maximize-btn" onclick="toggleTerminalMaximize()" title="最大化 / 还原">⤢ 最大化</button>
             <button class="tf-btn tf-close" onclick="closeTerminalWindow()" title="关闭窗口（不结束会话，可重新打开）">✕</button>
         </div>
         <div id="terminal-host" class="terminal-float-host"></div>
     </div>
 
-    <script src="controller.js?v=20260611141052"></script>
+    <script src="controller.js?v=20260611141929"></script>
 </body>
 </html>

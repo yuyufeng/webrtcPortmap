@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>远程终端</title>
+    <link rel="stylesheet" href="vendor/xterm.min.css">
+    <script src="vendor/xterm.min.js"></script>
+    <script src="vendor/xterm-addon-fit.min.js"></script>
+    <style>
+        html, body { margin: 0; height: 100%; background: #1e1e1e; overflow: hidden; }
+        #host { height: 100vh; padding: 4px; box-sizing: border-box; }
+        #notice { color: #ddd; font-family: -apple-system, sans-serif; padding: 24px; line-height: 1.7; }
+        #notice code { background: #333; padding: 2px 6px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div id="host"></div>
+    <script>
+    (function () {
+        var opener = window.opener;
+        if (!opener || opener.closed) {
+            document.getElementById('host').outerHTML =
+                '<div id="notice">本页面是远程终端的<strong>独立窗口</strong>，需要从主控制台的「🗗 新窗口终端」按钮打开。<br>请回到主控制台点击该按钮。</div>';
+            return;
+        }
+        if (typeof Terminal === 'undefined') {
+            document.getElementById('host').outerHTML = '<div id="notice">xterm.js 未加载（vendor 资源缺失）。</div>';
+            return;
+        }
+
+        var term = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: 'Consolas, "Courier New", monospace',
+            theme: { background: '#1e1e1e' },
+            scrollback: 5000
+        });
+        var fit = null;
+        try { if (window.FitAddon && FitAddon.FitAddon) { fit = new FitAddon.FitAddon(); term.loadAddon(fit); } } catch (e) {}
+        term.open(document.getElementById('host'));
+        function doFit() { if (fit) { try { fit.fit(); } catch (e) {} } }
+        doFit();
+
+        // ===== opener -> 本窗口：写入输出 / 清屏（回放） =====
+        window.wpWrite = function (b64) {
+            try {
+                var bin = atob(b64);
+                var arr = new Uint8Array(bin.length);
+                for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+                term.write(arr);
+            } catch (e) {}
+        };
+        window.wpReset = function () { try { term.reset(); } catch (e) {} };
+        window.wpSetTitle = function (t) { try { document.title = t; } catch (e) {} };
+
+        // ===== 本窗口 -> opener：键盘输入 / 尺寸 / 关闭 =====
+        term.onData(function (d) { try { opener.wpPopupInput(d); } catch (e) {} });
+        function reportResize() { doFit(); try { opener.wpPopupResize(term.cols, term.rows); } catch (e) {} }
+        window.addEventListener('resize', reportResize);
+        window.addEventListener('beforeunload', function () { try { opener.wpPopupClosed(); } catch (e) {} });
+
+        // 就绪：通知 opener，触发回放并把输出路由到本窗口
+        try { opener.wpPopupReady(term.cols, term.rows); } catch (e) {}
+        term.focus();
+    })();
+    </script>
+</body>
+</html>

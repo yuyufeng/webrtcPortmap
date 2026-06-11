@@ -2849,6 +2849,15 @@ function ensureXterm() {
 
 function openTerminal(isReattach) {
     if (!state.authenticated) { log('请先连接并鉴权', 'error'); return; }
+    // 终端已在独立新窗口中：只需重新触发回放到新窗口，不再弹出页内浮窗。
+    if (popupTerminalActive()) {
+        state.termOpen = true;
+        const c = state.termPopupCols || 80, r = state.termPopupRows || 24;
+        sendProtocolMessage({ type: 27, payload: { cols: c, rows: r } }); // TermResize
+        sendProtocolMessage({ type: 24, payload: { cols: c, rows: r } }); // TermOpen → 回放到新窗口
+        try { state.termPopup.focus(); } catch (e) {}
+        return;
+    }
     showTerminalWindow();
     const term = ensureXterm();
     if (!term) return;
@@ -2858,6 +2867,51 @@ function openTerminal(isReattach) {
     term.focus();
     setTermStatus(isReattach ? '已重连，正在回放历史…' : '终端已连接');
 }
+
+// ==================== 终端独立新窗口（与主窗口共用同一连接） ====================
+// 在新浏览器窗口里只放 xterm，通过 window.opener 桥接：输入回传主窗口的 DataChannel，
+// agent 输出推送到新窗口。仅一条 WebRTC 连接，不会抢占，新窗口里无主页面干扰元素。
+
+function popupTerminalActive() {
+    return !!(state.termPopup && !state.termPopup.closed);
+}
+
+function openTerminalPopup() {
+    if (!state.authenticated) { log('请先连接并鉴权', 'error'); return; }
+    if (popupTerminalActive()) { try { state.termPopup.focus(); } catch (e) {} return; }
+    const url = `${getWebConsoleBase()}/terminal.html`;
+    const w = window.open(url, 'wp_terminal_' + (state.agentID || 'x'), 'width=980,height=620,resizable=yes,scrollbars=no');
+    if (!w) { log('新窗口被浏览器拦截，请允许本站弹出窗口后重试', 'error'); setTermStatus('新窗口被拦截'); return; }
+    state.termPopup = w;
+    state.termPopupReady = false;
+    closeTerminalWindow();            // 收起页内浮窗，避免双显示
+    setTermStatus('已在独立新窗口打开终端');
+    log('已在独立新窗口打开远程终端');
+}
+
+// 新窗口就绪：触发回放并把输出路由到新窗口。
+window.wpPopupReady = function (cols, rows) {
+    state.termPopupReady = true;
+    state.termPopupCols = cols || 80;
+    state.termPopupRows = rows || 24;
+    state.termOpen = true;
+    try { state.termPopup.wpSetTitle('远程终端 - ' + (state.selectedAgentName || state.agentID || '')); } catch (e) {}
+    sendProtocolMessage({ type: 27, payload: { cols: state.termPopupCols, rows: state.termPopupRows } }); // TermResize
+    sendProtocolMessage({ type: 24, payload: { cols: state.termPopupCols, rows: state.termPopupRows } }); // TermOpen → 回放
+};
+window.wpPopupInput = function (data) { sendTermInput(data); };
+window.wpPopupResize = function (cols, rows) {
+    state.termPopupCols = cols; state.termPopupRows = rows;
+    if (popupTerminalActive() && state.termOpen) {
+        sendProtocolMessage({ type: 27, payload: { cols: cols, rows: rows } }); // TermResize
+    }
+};
+window.wpPopupClosed = function () {
+    state.termPopup = null;
+    state.termPopupReady = false;
+    setTermStatus('终端新窗口已关闭（远端会话保持，可重新打开）');
+};
+window.openTerminalPopup = openTerminalPopup;
 
 function killTerminal() {
     sendProtocolMessage({ type: 29, payload: {} }); // TermClose
@@ -2882,6 +2936,14 @@ function sendTermResize() {
 
 function handleTermData(payload) {
     if (!payload) return;
+    // 终端在独立新窗口时，输出推送到新窗口的 xterm（传 base64，由新窗口解码）。
+    if (popupTerminalActive() && state.termPopupReady) {
+        try {
+            if (payload.replay && state.termPopup.wpReset) state.termPopup.wpReset();
+            if (state.termPopup.wpWrite) state.termPopup.wpWrite(payload.data || '');
+            return;
+        } catch (e) { /* 新窗口已失效，回落到页内浮窗 */ }
+    }
     const term = ensureXterm();
     if (!term) return;
     const bytes = base64ToBytes(payload.data || '');
