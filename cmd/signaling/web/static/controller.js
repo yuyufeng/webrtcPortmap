@@ -872,6 +872,34 @@ function closeConnectModal() {
     document.getElementById('connect-modal')?.classList.add('hidden');
 }
 
+// ==================== 连接等待遮罩 ====================
+let connectingMaskTimer = null;
+function showConnectingMask(text) {
+    const mask = document.getElementById('connecting-mask');
+    if (!mask) return;
+    const t = document.getElementById('connecting-text');
+    if (t) t.textContent = text || '正在连接，请稍候…';
+    mask.classList.remove('hidden');
+    clearTimeout(connectingMaskTimer);
+    // 超时兜底：避免连接卡住时遮罩永久挡住页面。
+    connectingMaskTimer = setTimeout(() => {
+        hideConnectingMask();
+        showStatus('password-status', '连接超时，请重试', 'error');
+        log('连接超时，已自动取消', 'error');
+        try { disconnect(); } catch (e) {}
+    }, 30000);
+}
+function hideConnectingMask() {
+    clearTimeout(connectingMaskTimer);
+    document.getElementById('connecting-mask')?.classList.add('hidden');
+}
+function cancelConnecting() {
+    hideConnectingMask();
+    log('已取消连接');
+    try { disconnect(); } catch (e) {}
+}
+window.cancelConnecting = cancelConnecting;
+
 function openChangePasswordModal() {
     document.getElementById('change-password-old').value = '';
     document.getElementById('change-password-new').value = '';
@@ -964,10 +992,14 @@ async function connect() {
     state.agentPassword = passwordInput ? passwordInput.value.replace(/^\s+|\s+$/g, '') : '';
     
     if (!state.signalURL || !state.userSessionToken || !state.agentID || !state.agentPassword) {
+        state.connecting = false;
         alert('请填写所有必填项');
         return;
     }
-    
+
+    // 显示等待遮罩，覆盖页面避免重复操作（成功/失败/超时时隐藏）。
+    showConnectingMask(`正在连接 ${state.selectedAgentName || 'Agent'}，请稍候…`);
+
     try {
         log('连接到信令服务器...');
 
@@ -995,6 +1027,7 @@ async function connect() {
         
     } catch (err) {
         state.connecting = false;
+        hideConnectingMask();
         log(`连接失败: ${err.message}`, 'error');
         showStatus('password-status', `连接失败: ${err.message}`, 'error');
     }
@@ -1216,6 +1249,8 @@ async function handleDataChannelMessage(data) {
             state.peerHelloSeen = true;
             const ver = (msg.payload && msg.payload.version) || 0;
             if (ver !== PROTOCOL_VERSION) {
+                state.connecting = false;
+                hideConnectingMask();
                 log(`协议版本不匹配：Agent=v${ver}, 前端=v${PROTOCOL_VERSION}`, 'error');
                 showStatus('password-status', `鉴权失败：协议版本不匹配（Agent v${ver} / 前端 v${PROTOCOL_VERSION}），请升级到同一版本`, 'error');
                 try { state.pc && state.pc.close(); } catch (e) {}
@@ -1230,6 +1265,8 @@ async function handleDataChannelMessage(data) {
             try {
                 state.derivedKey = await deriveKey(state.agentPassword, state.agentID);
             } catch (err) {
+                state.connecting = false;
+                hideConnectingMask();
                 log(`密钥派生失败: ${err.message}`, 'error');
                 showStatus('password-status', '鉴权失败: 密钥派生错误', 'error');
                 return;
@@ -1242,6 +1279,7 @@ async function handleDataChannelMessage(data) {
             if (msg.payload && msg.payload.success) {
                 state.authenticated = true;
                 state.connecting = false;
+                hideConnectingMask();
                 // 鉴权成功后把本次使用的本地密码以 base64 存入 cookie，下次可一键连接。
                 saveAgentPassword(state.agentID, state.agentPassword);
                 log('鉴权成功！');
@@ -1253,6 +1291,7 @@ async function handleDataChannelMessage(data) {
                 document.getElementById('http-console-card')?.classList.remove('hidden');
             } else {
                 state.connecting = false;
+                hideConnectingMask();
                 // 密码错误：清掉可能已保存的旧凭据，下次需重新输入。
                 clearAgentPassword(state.agentID);
                 log('鉴权失败: 密码错误', 'error');
@@ -1439,6 +1478,7 @@ async function sendHTTPRequest() {
 
 function resetConnectionState() {
     state.connecting = false;
+    hideConnectingMask();
     if (state.dataChannel) {
         try { state.dataChannel.close(); } catch (e) {}
     }
