@@ -127,10 +127,17 @@
         }
         .agent-actions {
             display: flex;
+            flex-direction: column;
             gap: 10px;
         }
-        .agent-actions .btn {
+        .agent-actions-row {
+            display: flex;
+            gap: 10px;
+        }
+        .agent-actions-row > .btn,
+        .agent-actions-row > .connect-split {
             flex: 1 1 0;
+            min-width: 0;
         }
         .flex { display: flex; gap: 10px; }
         .stack { display: flex; flex-direction: column; gap: 12px; }
@@ -943,6 +950,6 @@ Accept: text/html,application/xhtml+xml</textarea>
         <div id="terminal-host" class="terminal-float-host"></div>
     </div>
 
-    <script src="controller.js?v=20260611144223"></script>
+    <script src="controller.js?v=20260611144949"></script>
 </body>
 </html>

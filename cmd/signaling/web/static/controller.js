@@ -703,7 +703,7 @@ function connectButtonHTML(agentId) {
         return `
             <div class="connect-split" style="flex:1 1 0;display:flex;position:relative;min-width:0;">
                 <button class="btn btn-primary" style="flex:1;min-width:0;border-top-right-radius:0;border-bottom-right-radius:0;" title="使用已保存的本地密码连接" onclick="connectWithSavedCred('${id}')">已有凭据连接</button>
-                <button class="btn btn-primary" style="flex:0 0 auto;padding:10px 9px;border-left:1px solid rgba(255,255,255,.4);border-top-left-radius:0;border-bottom-left-radius:0;" title="更多" onclick="toggleCredMenu(event,'${id}')">▾</button>
+                <button class="btn btn-primary" style="flex:0 0 30px;padding:0;background:#3f9e44;border-left:1px solid rgba(255,255,255,.3);border-top-left-radius:0;border-bottom-left-radius:0;font-size:11px;color:rgba(255,255,255,.92);" title="更多操作" onclick="toggleCredMenu(event,'${id}')">▾</button>
                 <div id="cred-menu-${id}" class="hidden" style="position:absolute;top:calc(100% + 4px);right:0;background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:60;overflow:hidden;min-width:150px;">
                     <a href="javascript:void(0)" onclick="reenterCred('${id}')" style="display:block;padding:9px 14px;font-size:13px;color:#334155;text-decoration:none;white-space:nowrap;">重新输入凭据</a>
                 </div>
@@ -745,9 +745,11 @@ function renderAgentList(agents) {
                 <div class="agent-status ${onlineClass}">${statusText}</div>
             </div>
             <div class="agent-actions">
-                ${connectButtonHTML(agent.id)}
-                <button class="btn btn-secondary" onclick="showClientCommands('${escapeHtml(agent.id)}')">📋 命令</button>
-                <button class="btn btn-danger" onclick="deleteAgent('${escapeHtml(agent.id)}', '${agentName}')">删除</button>
+                <div class="agent-actions-row">${connectButtonHTML(agent.id)}</div>
+                <div class="agent-actions-row">
+                    <button class="btn btn-secondary" onclick="showClientCommands('${escapeHtml(agent.id)}')">📋 命令</button>
+                    <button class="btn btn-danger" onclick="deleteAgent('${escapeHtml(agent.id)}', '${agentName}')">删除</button>
+                </div>
             </div>
         `;
         list.appendChild(li);
