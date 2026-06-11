@@ -116,7 +116,8 @@
             var box = document.getElementById('term-softkb-keys');
             var toggle = document.getElementById('term-softkb-toggle');
             if (!box || !toggle) return;
-            SOFT_KEYS.forEach(function (k) {
+            var ARROWS = ['↑', '↓', '←', '→'];
+            function mkBtn(k) {
                 var b = document.createElement('button');
                 b.type = 'button'; b.textContent = k.label;
                 b.addEventListener('pointerdown', function (e) {
@@ -124,8 +125,13 @@
                     try { opener.wpPopupInput(k.seq); } catch (x) {}
                     try { term.focus(); } catch (x) {}
                 });
-                box.appendChild(b);
-            });
+                return b;
+            }
+            SOFT_KEYS.filter(function (k) { return ARROWS.indexOf(k.label) < 0; }).forEach(function (k) { box.appendChild(mkBtn(k)); });
+            var arrowRow = document.createElement('div');
+            arrowRow.style.cssText = 'flex-basis:100%;display:flex;gap:5px;justify-content:flex-end;';
+            SOFT_KEYS.filter(function (k) { return ARROWS.indexOf(k.label) >= 0; }).forEach(function (k) { arrowRow.appendChild(mkBtn(k)); });
+            box.appendChild(arrowRow);
             toggle.addEventListener('click', function () { box.classList.toggle('hidden'); });
             if (softkb) softkb.style.display = 'flex';
         })();

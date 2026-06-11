@@ -2800,18 +2800,26 @@ const SOFT_KEYS = [
 ];
 
 // buildSoftKeyboard 惰性生成软键盘按键（只建一次）。
+// 方向键 ↑↓←→ 单独占一排（其余键自由换行）。
 function buildSoftKeyboard() {
     const box = document.getElementById('term-softkb-keys');
     if (!box || box.dataset.built) return;
     box.dataset.built = '1';
-    SOFT_KEYS.forEach(k => {
+    const ARROWS = ['↑', '↓', '←', '→'];
+    const mkBtn = (k) => {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.textContent = k.label;
         // 用 pointerdown 而非 click：避免移动端点击使终端失焦、并减少 300ms 延迟
         btn.addEventListener('pointerdown', (e) => { e.preventDefault(); softKey(k.seq); });
-        box.appendChild(btn);
-    });
+        return btn;
+    };
+    SOFT_KEYS.filter(k => !ARROWS.includes(k.label)).forEach(k => box.appendChild(mkBtn(k)));
+    // 方向键独占一行：flex-basis:100% 强制换行，行内不再换行
+    const arrowRow = document.createElement('div');
+    arrowRow.style.cssText = 'flex-basis:100%;display:flex;gap:5px;justify-content:flex-end;';
+    SOFT_KEYS.filter(k => ARROWS.includes(k.label)).forEach(k => arrowRow.appendChild(mkBtn(k)));
+    box.appendChild(arrowRow);
 }
 
 // toggleSoftKb 展开/收起软键盘按键面板。
