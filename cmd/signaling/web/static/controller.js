@@ -2778,9 +2778,58 @@ function showTerminalWindow() {
     if (!win) return;
     win.classList.remove('hidden');
     setupTerminalFloat();
+    buildSoftKeyboard();
     // 显示后下一帧再 fit，确保容器已有真实尺寸
     requestAnimationFrame(() => fitTerminal());
 }
+
+// ==================== 终端软键盘（移动端常用特殊键） ====================
+const SOFT_KEYS = [
+    { label: 'Esc', seq: '\x1b' },
+    { label: 'Tab', seq: '\t' },
+    { label: '^C', seq: '\x03' },     // Ctrl-C
+    { label: '^L', seq: '\x0c' },     // Ctrl-L 清屏
+    { label: '⇧Tab', seq: '\x1b[Z' }, // shift+tab 反向补全
+    { label: '/', seq: '/' },
+    { label: '-', seq: '-' },
+    { label: '|', seq: '|' },
+    { label: '↑', seq: '\x1b[A' },
+    { label: '↓', seq: '\x1b[B' },
+    { label: '←', seq: '\x1b[D' },
+    { label: '→', seq: '\x1b[C' },
+];
+
+// buildSoftKeyboard 惰性生成软键盘按键（只建一次）。
+function buildSoftKeyboard() {
+    const box = document.getElementById('term-softkb-keys');
+    if (!box || box.dataset.built) return;
+    box.dataset.built = '1';
+    SOFT_KEYS.forEach(k => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = k.label;
+        // 用 pointerdown 而非 click：避免移动端点击使终端失焦、并减少 300ms 延迟
+        btn.addEventListener('pointerdown', (e) => { e.preventDefault(); softKey(k.seq); });
+        box.appendChild(btn);
+    });
+}
+
+// toggleSoftKb 展开/收起软键盘按键面板。
+function toggleSoftKb() {
+    const box = document.getElementById('term-softkb-keys');
+    if (!box) return;
+    box.classList.toggle('hidden');
+}
+
+// softKey 把按键转义序列经 DataChannel 发给终端（浮窗与新窗口共用）。
+function softKey(seq) {
+    if (!state.termOpen) { log('终端未打开', 'error'); return; }
+    sendTermInput(seq);
+    // 焦点回到终端，方便继续物理键盘输入
+    if (popupTerminalActive()) { try { state.termPopup.focus(); } catch (e) {} }
+    else if (state.term) { try { state.term.focus(); } catch (e) {} }
+}
+window.toggleSoftKb = toggleSoftKb;
 
 // closeTerminalWindow 关闭浮动窗口（仅隐藏，不结束远端会话，可重新打开）。
 function closeTerminalWindow() {

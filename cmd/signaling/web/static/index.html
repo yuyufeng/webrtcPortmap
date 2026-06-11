@@ -966,6 +966,15 @@ Accept: text/html,application/xhtml+xml</textarea>
         .tf-btn.tf-danger:hover { background:#c0392b; border-color:#c0392b; }
         .tf-btn.tf-close:hover { background:#c0392b; border-color:#c0392b; }
         .terminal-float-host { flex:1; min-height:0; padding:6px; background:#1e1e1e; overflow:hidden; }
+        /* 终端软键盘（右上角，常用特殊键，移动端友好） */
+        .term-softkb { position:absolute; top:46px; right:10px; z-index:20; display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+        .term-softkb-toggle { background:rgba(45,45,45,.92); color:#ddd; border:1px solid #555; border-radius:6px; padding:5px 10px; cursor:pointer; font-size:15px; line-height:1; }
+        .term-softkb-toggle:hover { background:rgba(74,74,74,.95); }
+        .term-softkb-keys { display:flex; flex-wrap:wrap; gap:5px; max-width:248px; justify-content:flex-end; background:rgba(40,40,40,.96); padding:8px; border-radius:8px; border:1px solid #555; box-shadow:0 8px 22px rgba(0,0,0,.45); }
+        .term-softkb-keys.hidden { display:none; }
+        .term-softkb-keys button { background:#3a3a3a; color:#eee; border:1px solid #5a5a5a; border-radius:6px; padding:8px 10px; font-size:13px; line-height:1; cursor:pointer; min-width:38px; touch-action:manipulation; }
+        .term-softkb-keys button:hover { background:#474747; }
+        .term-softkb-keys button:active { background:#4CAF50; border-color:#4CAF50; }
     </style>
     <div id="terminal-float" class="terminal-float hidden">
         <div class="terminal-float-titlebar" id="terminal-float-titlebar">
@@ -978,8 +987,12 @@ Accept: text/html,application/xhtml+xml</textarea>
             <button class="tf-btn tf-close" onclick="closeTerminalWindow()" title="关闭窗口（不结束会话，可重新打开）">✕</button>
         </div>
         <div id="terminal-host" class="terminal-float-host"></div>
+        <div class="term-softkb" id="term-softkb">
+            <button class="term-softkb-toggle" id="term-softkb-toggle" onclick="toggleSoftKb()" title="软键盘（特殊按键）">⌨</button>
+            <div class="term-softkb-keys hidden" id="term-softkb-keys"></div>
+        </div>
     </div>
 
-    <script src="controller.js?v=20260611155240"></script>
+    <script src="controller.js?v=20260611160306"></script>
 </body>
 </html>

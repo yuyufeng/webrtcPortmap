@@ -21,11 +21,23 @@
         }
         #banner.show { display: flex; }
         #banner .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; flex: 0 0 auto; }
+        /* 软键盘（右上角，移动端常用特殊键） */
+        .term-softkb { position:absolute; top:8px; right:10px; z-index:20; display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+        .term-softkb.with-banner { top:42px; }
+        .term-softkb-toggle { background:rgba(45,45,45,.92); color:#ddd; border:1px solid #555; border-radius:6px; padding:5px 10px; cursor:pointer; font-size:15px; line-height:1; }
+        .term-softkb-keys { display:flex; flex-wrap:wrap; gap:5px; max-width:248px; justify-content:flex-end; background:rgba(40,40,40,.96); padding:8px; border-radius:8px; border:1px solid #555; box-shadow:0 8px 22px rgba(0,0,0,.45); }
+        .term-softkb-keys.hidden { display:none; }
+        .term-softkb-keys button { background:#3a3a3a; color:#eee; border:1px solid #5a5a5a; border-radius:6px; padding:8px 10px; font-size:13px; line-height:1; cursor:pointer; min-width:38px; touch-action:manipulation; }
+        .term-softkb-keys button:active { background:#4CAF50; border-color:#4CAF50; }
     </style>
 </head>
 <body>
     <div id="banner"><span class="dot"></span><span id="banner-text"></span></div>
     <div id="host"></div>
+    <div class="term-softkb" id="term-softkb" style="display:none;">
+        <button class="term-softkb-toggle" id="term-softkb-toggle" title="软键盘（特殊按键）">⌨</button>
+        <div class="term-softkb-keys hidden" id="term-softkb-keys"></div>
+    </div>
     <script>
     (function () {
         var opener = window.opener;
@@ -56,10 +68,12 @@
         var banner = document.getElementById('banner');
         var bannerText = document.getElementById('banner-text');
         var host = document.getElementById('host');
+        var softkb = document.getElementById('term-softkb');
         function showBanner(msg) {
             bannerText.textContent = msg || '连接已断开';
             banner.classList.add('show');
             host.classList.add('with-banner');
+            if (softkb) softkb.classList.add('with-banner');
             try { document.title = '⚠ 已断开 - 远程终端'; } catch (e) {}
             doFit();
         }
@@ -67,6 +81,7 @@
             if (!banner.classList.contains('show')) return;
             banner.classList.remove('show');
             host.classList.remove('with-banner');
+            if (softkb) softkb.classList.remove('with-banner');
             doFit();
         }
 
@@ -87,6 +102,33 @@
             showBanner('⚠ 连接已断开' + (msg ? '：' + msg : '') + ' —— 回主控制台重新连接后本窗口会自动恢复');
             try { term.write('\r\n\x1b[1;31m── 连接已断开' + (msg ? '（' + msg + '）' : '') + ' ──\x1b[0m\r\n\x1b[33m请回到主控制台重新连接，连接恢复后本窗口会自动回放并继续。\x1b[0m\r\n'); } catch (e) {}
         };
+
+        // ===== 软键盘（特殊键，经 opener 发到同一 DataChannel） =====
+        (function () {
+            var SOFT_KEYS = [
+                { label: 'Esc', seq: '\x1b' }, { label: 'Tab', seq: '\t' },
+                { label: '^C', seq: '\x03' }, { label: '^L', seq: '\x0c' },
+                { label: '⇧Tab', seq: '\x1b[Z' }, { label: '/', seq: '/' },
+                { label: '-', seq: '-' }, { label: '|', seq: '|' },
+                { label: '↑', seq: '\x1b[A' }, { label: '↓', seq: '\x1b[B' },
+                { label: '←', seq: '\x1b[D' }, { label: '→', seq: '\x1b[C' }
+            ];
+            var box = document.getElementById('term-softkb-keys');
+            var toggle = document.getElementById('term-softkb-toggle');
+            if (!box || !toggle) return;
+            SOFT_KEYS.forEach(function (k) {
+                var b = document.createElement('button');
+                b.type = 'button'; b.textContent = k.label;
+                b.addEventListener('pointerdown', function (e) {
+                    e.preventDefault();
+                    try { opener.wpPopupInput(k.seq); } catch (x) {}
+                    try { term.focus(); } catch (x) {}
+                });
+                box.appendChild(b);
+            });
+            toggle.addEventListener('click', function () { box.classList.toggle('hidden'); });
+            if (softkb) softkb.style.display = 'flex';
+        })();
 
         // ===== 本窗口 -> opener：键盘输入 / 尺寸 / 关闭 =====
         term.onData(function (d) { try { opener.wpPopupInput(d); } catch (e) {} });
