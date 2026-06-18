@@ -116,6 +116,10 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/admin/users/reset-usage", s.withCORS(s.handleAdminResetUsage))
 	mux.HandleFunc("/admin/users/reset-password", s.withCORS(s.handleAdminResetPassword))
 	mux.HandleFunc("/admin/users/delete", s.withCORS(s.handleAdminDeleteUser))
+	mux.HandleFunc("/share/create", s.withCORS(s.handleShareCreate))
+	mux.HandleFunc("/share/list", s.withCORS(s.handleShareList))
+	mux.HandleFunc("/share/revoke", s.withCORS(s.handleShareRevoke))
+	mux.HandleFunc("/share/redeem", s.withCORS(s.handleShareRedeem))
 	mux.HandleFunc("/controller/list", s.withCORS(s.handleControllerList))
 	mux.HandleFunc("/controller/agent/delete", s.withCORS(s.handleControllerAgentDelete))
 	mux.HandleFunc("/controller/agents/register", s.withCORS(s.handleControllerAgentRegister))
@@ -376,6 +380,20 @@ func (s *Server) requireAdmin(r *http.Request) (*UserSession, *UserRecord, error
 	return session, user, nil
 }
 
+// canAccessAgent 判断某会话是否有权访问指定 agent。
+// 共享作用域会话(ScopedAgentID 非空)只能访问其 ScopedAgentID 这一个 agent；
+// 普通会话需为该 agent 的 owner。必须先短路 ScopedAgentID，否则共享会话会因
+// UserID=owner 而越权访问 owner 名下其它 agent。
+func (s *Server) canAccessAgent(session *UserSession, user *UserRecord, reg *AgentRegistration) bool {
+	if session == nil || reg == nil {
+		return false
+	}
+	if session.ScopedAgentID != "" {
+		return session.ScopedAgentID == reg.AgentID
+	}
+	return user != nil && reg.OwnerUserID == user.ID
+}
+
 // adminConfigFile 是 -admin-config 的 JSON 结构。
 type adminConfigFile struct {
 	Admins []string `json:"admins"`
@@ -563,6 +581,171 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	writeJSON(w, map[string]interface{}{"success": true, "removed_agents": len(removedAgents)}, http.StatusOK)
+}
+
+// ==================== Agent 共享授权 ====================
+
+// parseShareDuration 把时长选项解析为 ttl（permanent/空 → 0 表示永久）。
+func parseShareDuration(d string) (time.Duration, bool) {
+	switch strings.TrimSpace(strings.ToLower(d)) {
+	case "1h":
+		return time.Hour, true
+	case "24h", "1d":
+		return 24 * time.Hour, true
+	case "30d", "1mo", "1month", "month":
+		return 30 * 24 * time.Hour, true
+	case "permanent", "forever", "0", "":
+		return 0, true
+	}
+	return 0, false
+}
+
+// handleShareCreate POST /share/create {agent_id, duration, agent_password, label?} —— owner 创建共享。
+func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
+	_, user, err := s.requireUser(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		AgentID       string `json:"agent_id"`
+		Duration      string `json:"duration"`
+		AgentPassword string `json:"agent_password"`
+		Label         string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	ttl, ok := parseShareDuration(req.Duration)
+	if !ok {
+		http.Error(w, "invalid duration (1h/24h/30d/permanent)", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.AgentPassword) == "" {
+		http.Error(w, "agent_password is required (用于免密码共享)", http.StatusBadRequest)
+		return
+	}
+	rec, err := s.dataStore.CreateShare(user.ID, req.AgentID, req.AgentPassword, req.Label, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"token":      rec.Token,
+		"agent_id":   rec.AgentID,
+		"expires_at": shareExpiryJSON(rec),
+		"permanent":  rec.ExpiresAt.IsZero(),
+	}, http.StatusOK)
+}
+
+// handleShareList GET /share/list —— 列出当前用户作为 owner 的共享。
+func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
+	_, user, err := s.requireUser(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	shares := s.dataStore.ListSharesByOwner(user.ID)
+	list := make([]map[string]interface{}, 0, len(shares))
+	for _, sh := range shares {
+		name := sh.AgentID
+		if reg := s.dataStore.GetAgent(sh.AgentID); reg != nil && reg.DisplayName != "" {
+			name = reg.DisplayName
+		}
+		expired := !sh.ExpiresAt.IsZero() && time.Now().After(sh.ExpiresAt)
+		list = append(list, map[string]interface{}{
+			"token":       sh.Token,
+			"agent_id":    sh.AgentID,
+			"agent_name":  name,
+			"label":       sh.Label,
+			"permanent":   sh.ExpiresAt.IsZero(),
+			"expires_at":  shareExpiryJSON(&sh),
+			"expired":     expired,
+			"created_at":  sh.CreatedAt,
+		})
+	}
+	writeJSON(w, map[string]interface{}{"shares": list}, http.StatusOK)
+}
+
+// handleShareRevoke POST /share/revoke {token}
+func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
+	_, user, err := s.requireUser(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := s.dataStore.RevokeShare(user.ID, req.Token); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"success": true}, http.StatusOK)
+}
+
+// handleShareRedeem POST /share/redeem {token} —— 接收方（无需登录）兑换共享令牌，
+// 拿到作用域会话 + agent 信息 + 托管密码，随后即可走正常连接流程。
+func (s *Server) handleShareRedeem(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	rec := s.dataStore.GetShare(req.Token)
+	if rec == nil {
+		http.Error(w, "share invalid or expired", http.StatusNotFound)
+		return
+	}
+	// 作用域会话 TTL：不超过 session TTL，且不超过共享剩余有效期。
+	ttl := s.sessionTTL
+	if !rec.ExpiresAt.IsZero() {
+		if remain := time.Until(rec.ExpiresAt); remain < ttl {
+			ttl = remain
+		}
+	}
+	session, err := s.dataStore.CreateScopedSession(rec.OwnerUserID, rec.AgentID, ttl)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	name := rec.AgentID
+	if reg := s.dataStore.GetAgent(rec.AgentID); reg != nil && reg.DisplayName != "" {
+		name = reg.DisplayName
+	}
+	// agent 上报的 ICE + 注入 owner 的内嵌 TURN（中转流量计入 owner 额度）。
+	s.mu.RLock()
+	var baseICE []protocol.ICEServerInfo
+	online := false
+	if agent := s.agents[rec.AgentID]; agent != nil {
+		baseICE = agent.ICEServers
+		online = time.Since(agent.LastSeen) < 30*time.Second
+	}
+	s.mu.RUnlock()
+	writeJSON(w, map[string]interface{}{
+		"session_token":  session.Token,
+		"agent_id":       rec.AgentID,
+		"display_name":   name,
+		"agent_password": rec.AgentPassword,
+		"ice_servers":    s.iceServersForUser(rec.OwnerUserID, baseICE),
+		"ttl_seconds":    int(time.Until(session.ExpiresAt).Seconds()),
+		"online":         online,
+	}, http.StatusOK)
+}
+
+// shareExpiryJSON 返回共享到期时间（永久则为 nil）。
+func shareExpiryJSON(rec *ShareRecord) interface{} {
+	if rec.ExpiresAt.IsZero() {
+		return nil
+	}
+	return rec.ExpiresAt
 }
 
 // handleAgentTurnCredentials —— agent 用其 token 拉取内嵌 TURN 临时凭据（归属到 owner 用户）。
@@ -1171,7 +1354,7 @@ func (s *Server) handleOwnedAgentConnect(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	registration := s.dataStore.GetAgent(req.AgentID)
-	if registration == nil || registration.OwnerUserID != user.ID {
+	if registration == nil || !s.canAccessAgent(session, user, registration) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}
@@ -1249,7 +1432,7 @@ func (s *Server) handleOwnedAgentDisconnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	registration := s.dataStore.GetAgent(req.AgentID)
-	if registration == nil || registration.OwnerUserID != user.ID {
+	if registration == nil || !s.canAccessAgent(session, user, registration) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}
@@ -1290,7 +1473,7 @@ func (s *Server) handleControllerPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registration := s.dataStore.GetAgent(agentID)
-	if registration == nil || registration.OwnerUserID != user.ID {
+	if registration == nil || !s.canAccessAgent(session, user, registration) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}
@@ -1328,7 +1511,7 @@ func (s *Server) handleControllerSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registration := s.dataStore.GetAgent(agentID)
-	if registration == nil || registration.OwnerUserID != user.ID {
+	if registration == nil || !s.canAccessAgent(session, user, registration) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}
@@ -1376,7 +1559,7 @@ func (s *Server) handleOwnedAgentWS(w http.ResponseWriter, r *http.Request, kind
 		return
 	}
 	registration := s.dataStore.GetAgent(agentID)
-	if registration == nil || registration.OwnerUserID != user.ID {
+	if registration == nil || !s.canAccessAgent(session, user, registration) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return
 	}

@@ -152,6 +152,7 @@ func main() {
 		username      = flag.String("username", "", "Login username")
 		userPassword  = flag.String("user-password", "", "Login password")
 		userHash      = flag.String("user-hash", "", "Login via user hash (alternative to -username/-user-password)")
+		shareToken    = flag.String("share", "", "Share token to access a shared agent (no account/password needed)")
 		agentID       = flag.String("agent", "", "Agent ID to connect")
 		agentPassword = flag.String("agent-password", "", "Agent local auth password")
 		listOnly      = flag.Bool("list", false, "List my agents and exit")
@@ -166,8 +167,9 @@ func main() {
 	flag.Var(&mappings, "map", "Local port mapping in the form <local_addr>=<port_id>, e.g. 127.0.0.1:18080=http")
 	flag.Parse()
 
-	if *userHash == "" && (*username == "" || *userPassword == "") {
-		fmt.Println("Usage (账户名+密码，或 -user-hash 二选一):")
+	if *shareToken == "" && *userHash == "" && (*username == "" || *userPassword == "") {
+		fmt.Println("Usage (账户名+密码 / -user-hash / -share 三选一):")
+		fmt.Println("  client -signal <url> -share <token> [-term | -map 127.0.0.1:18080=http]   # 用共享令牌免账号连接")
 		fmt.Println("  client -signal <url> -user-hash <hash> [-agent <agent_id> -agent-password <password> [-map ...|-term]]")
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass>")
 		fmt.Println("  client -signal <url> -username <user> -user-password <pass> -list")
@@ -201,45 +203,53 @@ func main() {
 	}
 	client.config.PrintICEServers()
 
-	var loginErr error
-	if client.userHash != "" {
-		loginErr = client.loginByHash()
-	} else {
-		loginErr = client.login()
-	}
-	if loginErr != nil {
-		fmt.Printf("[Client] Login failed: %v\n", loginErr)
-		os.Exit(1)
-	}
-
-	agents, err := client.listAgents()
-	if err != nil {
-		fmt.Printf("[Client] List agents failed: %v\n", err)
-		os.Exit(1)
-	}
-	printAgents(agents)
-	if *listOnly {
-		return
-	}
-	if client.agentID == "" {
-		if err := client.promptSelectAgent(agents); err != nil {
-			fmt.Printf("[Client] Select agent failed: %v\n", err)
+	if *shareToken != "" {
+		// 共享令牌：免账号、免密码——兑换后直接连接被共享的 agent。
+		if err := client.redeemShare(*shareToken); err != nil {
+			fmt.Printf("[Client] 共享令牌无效或已过期: %v\n", err)
 			os.Exit(1)
 		}
-	}
-	if client.selectedAgent == nil {
-		for i := range agents {
-			if agents[i].ID == client.agentID {
-				client.selectedAgent = &agents[i]
-				break
+	} else {
+		var loginErr error
+		if client.userHash != "" {
+			loginErr = client.loginByHash()
+		} else {
+			loginErr = client.login()
+		}
+		if loginErr != nil {
+			fmt.Printf("[Client] Login failed: %v\n", loginErr)
+			os.Exit(1)
+		}
+
+		agents, err := client.listAgents()
+		if err != nil {
+			fmt.Printf("[Client] List agents failed: %v\n", err)
+			os.Exit(1)
+		}
+		printAgents(agents)
+		if *listOnly {
+			return
+		}
+		if client.agentID == "" {
+			if err := client.promptSelectAgent(agents); err != nil {
+				fmt.Printf("[Client] Select agent failed: %v\n", err)
+				os.Exit(1)
 			}
 		}
-	}
-	if client.agentPassword == "" {
-		client.agentPassword = strings.TrimSpace(client.promptLine("请输入 Agent 本地密码: "))
+		if client.selectedAgent == nil {
+			for i := range agents {
+				if agents[i].ID == client.agentID {
+					client.selectedAgent = &agents[i]
+					break
+				}
+			}
+		}
 		if client.agentPassword == "" {
-			fmt.Println("[Client] Agent password is required")
-			os.Exit(1)
+			client.agentPassword = strings.TrimSpace(client.promptLine("请输入 Agent 本地密码: "))
+			if client.agentPassword == "" {
+				fmt.Println("[Client] Agent password is required")
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -389,6 +399,50 @@ func (c *Client) loginByHash() error {
 		c.username = result.Username
 	}
 	fmt.Printf("[Client] Login (by hash) successful: %s\n", c.username)
+	return nil
+}
+
+// redeemShare 用共享令牌兑换作用域会话 + agent 连接信息（免账号、免密码）。
+func (c *Client) redeemShare(token string) error {
+	body, _ := json.Marshal(map[string]string{"token": token})
+	resp, err := c.httpClient.Post(c.signalURL+"/share/redeem", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var msg bytes.Buffer
+		_, _ = msg.ReadFrom(resp.Body)
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(msg.String()))
+	}
+	var result struct {
+		SessionToken  string                   `json:"session_token"`
+		AgentID       string                   `json:"agent_id"`
+		DisplayName   string                   `json:"display_name"`
+		AgentPassword string                   `json:"agent_password"`
+		ICEServers    []protocol.ICEServerInfo `json:"ice_servers"`
+		Online        bool                     `json:"online"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	c.sessionToken = result.SessionToken
+	c.agentID = result.AgentID
+	c.agentPassword = result.AgentPassword
+	c.selectedAgent = &AgentInfo{
+		ID:          result.AgentID,
+		DisplayName: result.DisplayName,
+		ICEServers:  result.ICEServers,
+		Online:      result.Online,
+	}
+	status := "离线"
+	if result.Online {
+		status = "在线"
+	}
+	fmt.Printf("[Client] 共享访问：%s (%s) [%s]\n", result.DisplayName, result.AgentID, status)
+	if !result.Online {
+		fmt.Println("[Client] ⚠️ 该 Agent 当前离线，连接可能失败")
+	}
 	return nil
 }
 

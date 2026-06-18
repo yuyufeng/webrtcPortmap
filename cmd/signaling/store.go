@@ -66,6 +66,22 @@ type UserSession struct {
 	UserID     string    `json:"user_id"`
 	TenantCode string    `json:"tenant_code"`
 	ExpiresAt  time.Time `json:"expires_at"`
+
+	// ScopedAgentID 非空表示这是「共享作用域会话」：UserID 为该 agent 的 owner（用于 TURN 计量/显示），
+	// 但只允许访问 ScopedAgentID 这一个 agent，不能访问 owner 名下其它 agent。
+	ScopedAgentID string `json:"scoped_agent_id,omitempty"`
+}
+
+// ShareRecord 是一条 agent 共享授权（令牌/链接式）。
+// 持有 Token 的人在有效期内可连接该 agent，无需账号、无需知道密码（密码已托管）。
+type ShareRecord struct {
+	Token         string    `json:"token"`
+	AgentID       string    `json:"agent_id"`
+	OwnerUserID   string    `json:"owner_user_id"`
+	AgentPassword string    `json:"agent_password"` // 托管的 agent 本地密码（供接收方自动握手）
+	Label         string    `json:"label,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at"` // 零值 = 永久
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type PersistentState struct {
@@ -76,6 +92,7 @@ type PersistentState struct {
 	Agents            map[string]*AgentRegistration `json:"agents"`
 	VerificationCodes map[string]*VerificationCode  `json:"verification_codes"`
 	Sessions          map[string]*UserSession       `json:"sessions"`
+	Shares            map[string]*ShareRecord       `json:"shares"` // key = token
 }
 
 type DataStore struct {
@@ -95,6 +112,7 @@ func NewDataStore(path string) (*DataStore, error) {
 			Agents:            map[string]*AgentRegistration{},
 			VerificationCodes: map[string]*VerificationCode{},
 			Sessions:          map[string]*UserSession{},
+			Shares:            map[string]*ShareRecord{},
 		},
 	}
 	if path == "" {
@@ -144,6 +162,9 @@ func (ds *DataStore) load() error {
 	}
 	if state.Sessions == nil {
 		state.Sessions = map[string]*UserSession{}
+	}
+	if state.Shares == nil {
+		state.Shares = map[string]*ShareRecord{}
 	}
 	changed := false
 	rebuildUserHashIndex := len(state.UsersByHash) == 0
@@ -529,6 +550,12 @@ func (ds *DataStore) DeleteUser(userID string) ([]string, error) {
 			delete(ds.data.Agents, agentID)
 		}
 	}
+	// 该用户创建的共享
+	for token, sh := range ds.data.Shares {
+		if sh != nil && sh.OwnerUserID == userID {
+			delete(ds.data.Shares, token)
+		}
+	}
 	if err := ds.saveLocked(); err != nil {
 		return removedAgents, err
 	}
@@ -615,6 +642,102 @@ func (ds *DataStore) GetSession(token string) (*UserSession, *UserRecord) {
 		return nil, nil
 	}
 	return session, user
+}
+
+// ==================== Agent 共享授权 ====================
+
+// shareValidLocked 判断共享是否仍有效（未过期）。ExpiresAt 零值=永久。
+func shareValidLocked(rec *ShareRecord) bool {
+	if rec == nil {
+		return false
+	}
+	return rec.ExpiresAt.IsZero() || time.Now().Before(rec.ExpiresAt)
+}
+
+// CreateShare 为某 agent 创建共享授权（校验 agent 归属 owner）。ttl<=0 表示永久。
+func (ds *DataStore) CreateShare(ownerID, agentID, agentPassword, label string, ttl time.Duration) (*ShareRecord, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	reg := ds.data.Agents[agentID]
+	if reg == nil || reg.OwnerUserID != ownerID {
+		return nil, fmt.Errorf("agent not found or not owner")
+	}
+	rec := &ShareRecord{
+		Token:         randomToken("shr"),
+		AgentID:       agentID,
+		OwnerUserID:   ownerID,
+		AgentPassword: agentPassword,
+		Label:         strings.TrimSpace(label),
+		CreatedAt:     time.Now(),
+	}
+	if ttl > 0 {
+		rec.ExpiresAt = time.Now().Add(ttl)
+	}
+	ds.data.Shares[rec.Token] = rec
+	if err := ds.saveLocked(); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// GetShare 返回有效（未过期）的共享记录；过期或不存在返回 nil。
+func (ds *DataStore) GetShare(token string) *ShareRecord {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+	rec := ds.data.Shares[strings.TrimSpace(token)]
+	if !shareValidLocked(rec) {
+		return nil
+	}
+	return rec
+}
+
+// ListSharesByOwner 返回某 owner 创建的全部共享（含已过期，供其管理）。
+func (ds *DataStore) ListSharesByOwner(ownerID string) []ShareRecord {
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+	out := make([]ShareRecord, 0)
+	for _, rec := range ds.data.Shares {
+		if rec != nil && rec.OwnerUserID == ownerID {
+			out = append(out, *rec)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out
+}
+
+// RevokeShare 删除某 owner 名下的一条共享。
+func (ds *DataStore) RevokeShare(ownerID, token string) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	rec := ds.data.Shares[strings.TrimSpace(token)]
+	if rec == nil || rec.OwnerUserID != ownerID {
+		return fmt.Errorf("share not found")
+	}
+	delete(ds.data.Shares, rec.Token)
+	return ds.saveLocked()
+}
+
+// CreateScopedSession 为「共享接收方」创建一个只能访问指定 agent 的作用域会话。
+// UserID 用 agent 的 owner（用于 TURN 计量/显示），ScopedAgentID 限定可访问范围。
+func (ds *DataStore) CreateScopedSession(ownerUserID, agentID string, ttl time.Duration) (*UserSession, error) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	owner := ds.data.Users[ownerUserID]
+	if owner == nil {
+		return nil, fmt.Errorf("owner not found")
+	}
+	session := &UserSession{
+		Token:         randomToken("shs"),
+		UserID:        ownerUserID,
+		TenantCode:    owner.TenantCode,
+		ExpiresAt:     time.Now().Add(ttl),
+		ScopedAgentID: agentID,
+	}
+	ds.data.Sessions[session.Token] = session
+	if err := ds.saveLocked(); err != nil {
+		return nil, err
+	}
+	return session, nil
 }
 
 // GetUserByHash 按用户 hash 解析用户（用于 client 以 user hash 做第一层身份）。
@@ -750,5 +873,11 @@ func (ds *DataStore) DeleteUserAgent(ownerUserID, agentID string) error {
 		return fmt.Errorf("agent does not belong to current user")
 	}
 	delete(ds.data.Agents, agentID)
+	// 同时移除该 agent 的共享，避免悬空令牌。
+	for token, sh := range ds.data.Shares {
+		if sh != nil && sh.AgentID == agentID {
+			delete(ds.data.Shares, token)
+		}
+	}
 	return ds.saveLocked()
 }

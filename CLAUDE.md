@@ -204,6 +204,28 @@ agent 新增 flag：`-use-server-turn`（默认 true）。
 ### Web 使用动画指南
 - `cmd/signaling/web/static/guide.html`：以「内网跑 AI CLI、人在外面想接回去」痛点切入的单文件动画说明（纯 CSS/SVG，go:embed 嵌入，访问 `/guide.html`，主控制台首页有入口）。
 
+## Agent 共享授权（令牌/链接式，2026-06-18 新增）
+
+让 agent 的 **owner 把 agent 共享出去**：生成带时长的**共享令牌/链接**，持有者**免账号、免密码**即可
+Web/Client 直连该 agent（终端 + HTTP + 端口映射全开放）。授权时长 **1h / 24h / 30d / 永久**，owner 可随时撤销。
+
+- **数据模型**（`store.go`）：`ShareRecord{Token, AgentID, OwnerUserID, AgentPassword(托管), ExpiresAt(零值=永久)}`
+  存于 `PersistentState.Shares`；`UserSession` 增 `ScopedAgentID`——「作用域会话」UserID=owner（用于 TURN 计量/显示）
+  但**只能访问 ScopedAgentID 这一个 agent**。
+- **授权改造**（`main.go`）：新增 `canAccessAgent(session,user,reg)`——作用域会话**先短路**只认 ScopedAgentID，
+  普通会话才按 owner 判。connect/poll/send/ws 4 处归属校验全改用它（共享会话不会越权到 owner 其它 agent）。
+- **端点**：`POST /share/create`(owner，body `{agent_id,duration,agent_password,label}`)、`GET /share/list`、
+  `POST /share/revoke`、`POST /share/redeem`(**无需登录**，token→作用域会话+agent_id+托管密码+ice_servers)。
+- **免密码原理**：owner 创建共享时把 agent 本地密码随请求上传，存进 ShareRecord（数据文件 0600）；接收方 redeem
+  拿到密码自动完成端到端握手。**这是 owner 主动托管**——撤销/删除 agent/删除 user 都会清掉对应共享。
+- **前端**：owner 卡片「🔗 共享」按钮 → 弹窗选时长 → 生成链接 + client 命令 + 现有共享列表/撤销（`controller.js`
+  `openShareModal/createShare/loadAgentShares/revokeShare`）。接收方：页面带 `?share=<token>` → `enterShareMode`
+  redeem → 隐藏 owner UI → 用作用域会话+托管密码走现有 `connect()` 流程。
+- **client**：`-share <token>`（与 `-username/-user-hash` 三选一）→ `redeemShare()` → 免登录直连；`-term`/`-map` 一致。
+- ⚠️ **安全**：共享令牌=全权限凭据，务必私下传递；密码被托管在服务端数据文件。中转流量计入 **owner** 月度额度。
+- 已端到端验证（2026-06-18）：create/list/redeem/revoke + **作用域隔离**（scoped 会话连他人 agent=404）+
+  `client -share -term` 真实 agent 跑通命令（免账号免密码）+ Web `?share=` redeem/共享模式/离线检测。
+
 ## 当前状态与下一步（接手时优先处理）
 
 终端功能代码已全部写完，并已在 Windows + Go 1.25.1 下**编译验证通过**（2026-06-07）：

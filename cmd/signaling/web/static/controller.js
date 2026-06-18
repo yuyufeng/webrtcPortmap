@@ -748,6 +748,7 @@ function renderAgentList(agents) {
                 <div class="agent-actions-row">${connectButtonHTML(agent.id)}</div>
                 <div class="agent-actions-row">
                     <button class="btn btn-secondary" onclick="showClientCommands('${escapeHtml(agent.id)}')">📋 命令</button>
+                    <button class="btn btn-secondary" onclick="openShareModal('${escapeHtml(agent.id)}')">🔗 共享</button>
                     <button class="btn btn-danger" onclick="deleteAgent('${escapeHtml(agent.id)}', '${agentName}')">删除</button>
                 </div>
             </div>
@@ -755,6 +756,128 @@ function renderAgentList(agents) {
         list.appendChild(li);
     });
 }
+
+// ==================== Agent 共享（owner 端） ====================
+function shareCopyRow(label, text) {
+    return `<div style="display:flex;gap:8px;align-items:stretch;margin-bottom:8px;">
+        <div style="flex:0 0 70px;font-size:12px;color:#64748b;display:flex;align-items:center;">${label}</div>
+        <code style="flex:1;background:#0d1117;color:#c9d1d9;padding:8px 10px;border-radius:6px;font-size:12px;white-space:pre-wrap;word-break:break-all;font-family:Consolas,monospace;">${escapeHtml(text)}</code>
+        <button class="btn btn-secondary" data-copy="${escapeHtml(text)}" style="flex:0 0 auto;align-self:center;">复制</button>
+    </div>`;
+}
+
+function openShareModal(agentId) {
+    const agent = state.agentsById[agentId];
+    const name = agent ? (agent.display_name || agent.id) : agentId;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:10000;padding:20px;';
+    overlay.innerHTML = `
+        <div style="background:#fff;border-radius:10px;max-width:660px;width:100%;max-height:88vh;overflow:auto;padding:22px;box-shadow:0 20px 50px rgba(0,0,0,.3);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <h2 style="font-size:18px;color:#333;">🔗 共享 Agent</h2>
+                <button class="btn btn-secondary" data-close="1" style="padding:4px 12px;">✕</button>
+            </div>
+            <div style="font-size:13px;color:#475569;margin-bottom:12px;">Agent：<b>${escapeHtml(name)}</b></div>
+            <div style="font-size:12.5px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.6;">
+                ⚠️ 持有共享链接/令牌的人在有效期内可<b>完整访问</b>该 Agent（终端 / HTTP / 端口映射），且<b>无需密码、无需账号</b>。请仅私下分享给信任的人。创建即把本地密码托管到服务器，撤销或删除后立即失效。
+            </div>
+            <div class="form-group">
+                <label>授权时长</label>
+                <select id="share-duration">
+                    <option value="1h">1 小时</option>
+                    <option value="24h" selected>24 小时</option>
+                    <option value="30d">1 个月</option>
+                    <option value="permanent">永久</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" id="share-create-btn">生成共享链接</button>
+            <div id="share-result" style="margin-top:14px;"></div>
+            <hr style="margin:18px 0;border:none;border-top:1px solid #eee;">
+            <div style="font-weight:600;font-size:14px;color:#334155;margin-bottom:8px;">该 Agent 现有共享</div>
+            <div id="share-existing" style="font-size:13px;color:#64748b;">加载中…</div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-close="1"]').addEventListener('click', close);
+    overlay.querySelector('#share-create-btn').addEventListener('click', () => createShare(agentId, overlay));
+    loadAgentShares(agentId, overlay);
+}
+
+async function createShare(agentId, overlay) {
+    const duration = overlay.querySelector('#share-duration')?.value || '24h';
+    let pwd = getSavedAgentPassword(agentId);
+    if (!pwd) {
+        pwd = window.prompt('请输入该 Agent 的本地密码（用于免密码共享，将托管到服务器）：', '');
+        if (pwd == null) return;
+        if (!String(pwd).trim()) { log('密码不能为空', 'error'); return; }
+    }
+    try {
+        const resp = await fetch(`${getSignalURL()}/share/create`, {
+            method: 'POST', headers: buildJSONHeaders(true),
+            body: JSON.stringify({ agent_id: agentId, duration, agent_password: pwd })
+        });
+        if (!resp.ok) { log(`创建共享失败: ${await resp.text()}`, 'error'); return; }
+        const d = await resp.json();
+        const origin = window.location.origin;
+        const url = `${origin}/webconsole/?share=${d.token}`;
+        const cmd = `client -signal ${origin} -share ${d.token}`;
+        const exp = d.permanent ? '永久有效' : ('到期：' + new Date(d.expires_at).toLocaleString());
+        const res = overlay.querySelector('#share-result');
+        res.innerHTML = `
+            <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px;">
+                <div style="font-size:13px;color:#065f46;margin-bottom:10px;">✅ 已创建（${exp}）。把<b>共享链接</b>发给对方即可直接 Web 访问终端；或用 client 命令连接：</div>
+                ${shareCopyRow('共享链接', url)}
+                ${shareCopyRow('Client', cmd)}
+            </div>`;
+        res.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => copyText(b.dataset.copy, b)));
+        log('已创建共享');
+        loadAgentShares(agentId, overlay);
+    } catch (err) {
+        log(`创建共享失败: ${err.message}`, 'error');
+    }
+}
+
+async function loadAgentShares(agentId, overlay) {
+    const box = overlay.querySelector('#share-existing');
+    if (!box) return;
+    try {
+        const resp = await fetch(`${getSignalURL()}/share/list`, { headers: buildJSONHeaders(true) });
+        if (!resp.ok) { box.textContent = '加载失败'; return; }
+        const d = await resp.json();
+        const shares = (d.shares || []).filter(s => s.agent_id === agentId);
+        if (!shares.length) { box.textContent = '暂无共享'; return; }
+        box.innerHTML = shares.map(s => {
+            const exp = s.permanent ? '永久' : (s.expired ? '已过期' : new Date(s.expires_at).toLocaleString());
+            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9;">
+                <code style="flex:1;font-size:11px;color:#64748b;word-break:break-all;">…${escapeHtml(s.token.slice(-12))}</code>
+                <span style="font-size:12px;color:${s.expired ? '#c00' : '#64748b'};white-space:nowrap;">${exp}</span>
+                <button class="btn btn-secondary" data-copylink="${escapeHtml(window.location.origin + '/webconsole/?share=' + s.token)}" style="padding:3px 10px;">复制链接</button>
+                <button class="btn btn-danger" data-revoke="${escapeHtml(s.token)}" style="padding:3px 10px;">撤销</button>
+            </div>`;
+        }).join('');
+        box.querySelectorAll('[data-copylink]').forEach(b => b.addEventListener('click', () => copyText(b.dataset.copylink, b)));
+        box.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', () => revokeShare(b.dataset.revoke, agentId, overlay)));
+    } catch (err) {
+        box.textContent = '加载失败';
+    }
+}
+
+async function revokeShare(token, agentId, overlay) {
+    if (!window.confirm('撤销后该共享链接/令牌立即失效，确定？')) return;
+    try {
+        const resp = await fetch(`${getSignalURL()}/share/revoke`, {
+            method: 'POST', headers: buildJSONHeaders(true),
+            body: JSON.stringify({ token })
+        });
+        if (!resp.ok) { log(`撤销失败: ${await resp.text()}`, 'error'); return; }
+        log('已撤销共享');
+        loadAgentShares(agentId, overlay);
+    } catch (err) {
+        log(`撤销失败: ${err.message}`, 'error');
+    }
+}
+window.openShareModal = openShareModal;
 
 // ==================== client 连接命令复制 ====================
 
@@ -1164,11 +1287,22 @@ async function waitForIceGathering() {
 
 async function startSignalingPoll() {
     const poll = async () => {
-        if (!state.pc || state.pc.connectionState === 'closed') return;
-        
+        // 信令（answer/candidate 交换）只在 P2P 建立前需要：连上(connected)或失败(failed/closed)
+        // 后停止轮询，否则会持续每 100ms 空打 poll；尤其当本会话被其它窗口接管(409)时会疯狂刷屏。
+        if (!state.pc
+            || state.pc.connectionState === 'closed'
+            || state.pc.connectionState === 'connected'
+            || state.pc.connectionState === 'failed') return;
+
         try {
             const response = await fetch(`${getSignalURL()}/controller/poll?agent_id=${state.agentID}`, { headers: buildJSONHeaders(true) });
-            
+
+            if (response.status === 409) {
+                // 该 agent 的在线会话已被其它标签页/窗口（同一用户、不同 session）接管，
+                // 本轮询失去归属。P2P 直连不经信令故不受影响，直接停止轮询，避免空转刷 409。
+                log('信令会话已被其它窗口接管，停止信令轮询（P2P 直连不受影响）', 'error');
+                return;
+            }
             if (response.status === 200) {
                 const msg = await response.json();
                 if (msg.type === 'answer' && msg.sdp) {
@@ -1195,8 +1329,11 @@ async function startSignalingPoll() {
                 }
             }
         } catch (err) {}
-        
-        if (state.pc && state.pc.connectionState !== 'closed') {
+
+        if (state.pc
+            && state.pc.connectionState !== 'closed'
+            && state.pc.connectionState !== 'connected'
+            && state.pc.connectionState !== 'failed') {
             setTimeout(poll, 100);
         }
     };
@@ -3157,8 +3294,61 @@ window.onload = async () => {
         });
     }
     updatePreviewNavUI();
+    // 共享访问：URL 带 ?share=<token> 时走免登录的接收方流程，跳过常规登录恢复。
+    const shareToken = new URLSearchParams(window.location.search).get('share');
+    if (shareToken) {
+        await enterShareMode(shareToken);
+        return;
+    }
     await restoreLoginSession();
 };
+
+// ==================== 共享接收方（免账号 Web 直连） ====================
+function hideOwnerCardsForShare() {
+    ['intro-card', 'account-card', 'agent-register-card', 'agents-card', 'my-quota-card', 'admin-user-mgmt-card']
+        .forEach(id => document.getElementById(id)?.classList.add('hidden'));
+    document.getElementById('topbar')?.classList.add('hidden');
+}
+
+function showShareError(msg) {
+    let el = document.getElementById('share-error');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'share-error';
+        el.style.cssText = 'max-width:680px;margin:24px auto;padding:16px 18px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#991b1b;font-size:14px;line-height:1.7;';
+        document.querySelector('.container')?.prepend(el);
+    }
+    el.innerHTML = `⚠️ ${escapeHtml(msg)}`;
+}
+
+async function enterShareMode(token) {
+    hideOwnerCardsForShare();
+    try {
+        const resp = await fetch(`${getSignalURL()}/share/redeem`, {
+            method: 'POST', headers: buildJSONHeaders(false),
+            body: JSON.stringify({ token })
+        });
+        if (!resp.ok) { showShareError('共享链接无效或已过期，请向分享者索取新链接。'); return; }
+        const d = await resp.json();
+        state.signalURL = window.location.origin;
+        state.userSessionToken = d.session_token;          // 作用域会话，仅可访问该 agent
+        state.currentUser = { username: '共享访问', user_hash: '', is_admin: false };
+        state.agentID = d.agent_id;
+        state.agentPassword = d.agent_password;             // 托管密码，自动完成握手
+        state.selectedAgentName = d.display_name || d.agent_id;
+        state.selectedAgent = { id: d.agent_id, display_name: d.display_name, ice_servers: d.ice_servers };
+        state.agentsById = state.agentsById || {};
+        state.agentsById[d.agent_id] = state.selectedAgent;
+        state.isShareMode = true;
+        const pi = document.getElementById('agent-password');
+        if (pi) pi.value = d.agent_password;                // connect() 从该输入框读取密码
+        log(`共享访问：${state.selectedAgentName}`);
+        if (!d.online) { showShareError(`Agent「${state.selectedAgentName}」当前离线，请稍后刷新本页重试。`); return; }
+        connect();
+    } catch (err) {
+        showShareError('无法建立共享连接：' + err.message);
+    }
+}
 
 function clearLogs() {
     const logs = document.getElementById('logs');
