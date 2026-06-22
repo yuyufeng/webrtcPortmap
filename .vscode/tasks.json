@@ -1,0 +1,56 @@
+{
+  // 不经调试器(dlv)直接 go run 启动本地服务——「只想跑起来测」时用这个最省事。
+  // 用法：命令面板 → Tasks: Run Task → 选对应任务。每个任务在独立终端运行。
+  "version": "2.0.0",
+  "inputs": [
+    { "id": "ownerHash", "type": "promptString", "description": "Agent owner-hash（Web 注册后在「查看用户 Hash」里复制，形如 uh_...）" },
+    { "id": "agentPassword", "type": "promptString", "description": "Agent 本地密码（自定，连接时要用）" },
+    { "id": "username", "type": "promptString", "description": "登录用户名" },
+    { "id": "userPassword", "type": "promptString", "description": "登录密码", "password": true },
+    { "id": "shareToken", "type": "promptString", "description": "共享令牌（owner 共享后得到的 shr_...）" }
+  ],
+  "tasks": [
+    {
+      "label": "run: signaling (本地)",
+      "type": "shell",
+      "command": "go run ./cmd/signaling -addr 127.0.0.1:8443 -data data/dev.json",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "presentation": { "panel": "dedicated", "group": "wp" },
+      "problemMatcher": []
+    },
+    {
+      "label": "run: signaling (本地 + 内嵌 TURN)",
+      "type": "shell",
+      "command": "go run ./cmd/signaling -addr 127.0.0.1:8443 -data data/dev.json -turn-enabled -turn-public-ip 127.0.0.1 -turn-port 3478 -turn-secret localtestsecret",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "presentation": { "panel": "dedicated", "group": "wp" },
+      "problemMatcher": []
+    },
+    {
+      "label": "run: agent (内嵌终端)",
+      "type": "shell",
+      "command": "go run ./cmd/agent -id testagent -name \"本地测试 Agent\" -owner-hash ${input:ownerHash} -password ${input:agentPassword} -signal http://127.0.0.1:8443 -terminal -terminal-shell powershell",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "panel": "dedicated", "group": "wp" },
+      "problemMatcher": []
+    },
+    {
+      "label": "run: client (账号登录 + 终端)",
+      "type": "shell",
+      "command": "go run ./cmd/client -signal http://127.0.0.1:8443 -username ${input:username} -user-password ${input:userPassword} -term",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "panel": "dedicated", "group": "wp" },
+      "problemMatcher": []
+    },
+    {
+      "label": "run: client (共享令牌 -share + 终端)",
+      "type": "shell",
+      "command": "go run ./cmd/client -signal http://127.0.0.1:8443 -share ${input:shareToken} -term",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "panel": "dedicated", "group": "wp" },
+      "problemMatcher": []
+    }
+  ]
+}

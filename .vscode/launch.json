@@ -1,0 +1,97 @@
+{
+  // 本地服务测试启动配置（VS Code + Go 扩展）。
+  // 典型顺序：
+  //   1) 先启「signaling」→ 浏览器开 http://127.0.0.1:8443/webconsole/ 注册用户、登记 agent
+  //   2) 在「查看用户 Hash 和 Agent 启动命令」里复制 user-hash
+  //   3) 启「agent (终端)」，按提示粘贴 owner-hash、自定 agent 密码
+  //   4) 浏览器登录连接，或启「client」用账号/共享令牌连接
+  "version": "0.2.0",
+  "inputs": [
+    { "id": "ownerHash", "type": "promptString", "description": "Agent owner-hash（Web 注册后在「查看用户 Hash」里复制，形如 uh_...）" },
+    { "id": "agentPassword", "type": "promptString", "description": "Agent 本地密码（自定，连接时要用）" },
+    { "id": "username", "type": "promptString", "description": "登录用户名" },
+    { "id": "userPassword", "type": "promptString", "description": "登录密码", "password": true },
+    { "id": "shareToken", "type": "promptString", "description": "共享令牌（owner 共享后得到的 shr_...）" }
+  ],
+  "configurations": [
+    {
+      "name": "1) signaling (本地)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/signaling",
+      "args": ["-addr", "127.0.0.1:8443", "-data", "data/dev.json"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "1b) signaling (本地 + 内嵌 TURN)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/signaling",
+      "args": [
+        "-addr", "127.0.0.1:8443",
+        "-data", "data/dev.json",
+        "-turn-enabled", "-turn-public-ip", "127.0.0.1",
+        "-turn-port", "3478", "-turn-secret", "localtestsecret"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "2) agent (内嵌终端)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/agent",
+      "args": [
+        "-id", "testagent",
+        "-name", "本地测试 Agent",
+        "-owner-hash", "${input:ownerHash}",
+        "-password", "${input:agentPassword}",
+        "-signal", "http://127.0.0.1:8443",
+        "-terminal", "-terminal-shell", "powershell"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "3) client (账号登录 + 终端)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/client",
+      "args": [
+        "-signal", "http://127.0.0.1:8443",
+        "-username", "${input:username}",
+        "-user-password", "${input:userPassword}",
+        "-term"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "3b) client (共享令牌 -share + 终端)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/client",
+      "args": [
+        "-signal", "http://127.0.0.1:8443",
+        "-share", "${input:shareToken}",
+        "-term"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      // 注意：agent 需要 owner-hash（要先启 signaling、注册用户拿到 hash），
+      // 故首次测试请按上面 1→2 顺序单独启动；本组合适合 hash 已知后的快速重启。
+      "name": "signaling + agent",
+      "configurations": ["1) signaling (本地)", "2) agent (内嵌终端)"]
+    }
+  ]
+}
