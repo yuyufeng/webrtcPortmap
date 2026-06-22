@@ -546,6 +546,8 @@ func (a *Agent) register() error {
 }
 
 func (a *Agent) registerWithBackoff() error {
+	// 退避上限 30s（原 5min 过长——服务器恢复后 agent 可能仍卡在长 sleep 里，看似"不重连"）。
+	const maxDelay = 30 * time.Second
 	delay := 1 * time.Second
 	for {
 		select {
@@ -560,9 +562,6 @@ func (a *Agent) registerWithBackoff() error {
 			fmt.Printf("[Agent] Registration failed: %v\n", err)
 		}
 
-		if delay > 5*time.Minute {
-			delay = 5 * time.Minute
-		}
 		fmt.Printf("[Agent] Retry registration in %s\n", delay)
 		timer := time.NewTimer(delay)
 		select {
@@ -571,10 +570,10 @@ func (a *Agent) registerWithBackoff() error {
 			timer.Stop()
 			return fmt.Errorf("agent is stopping")
 		}
-		if delay < 5*time.Minute {
+		if delay < maxDelay {
 			delay *= 2
-			if delay > 5*time.Minute {
-				delay = 5 * time.Minute
+			if delay > maxDelay {
+				delay = maxDelay
 			}
 		}
 	}
