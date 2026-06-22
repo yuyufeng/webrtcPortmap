@@ -39,7 +39,7 @@ if %errorlevel% neq 0 (
 )
 echo.
 
-echo [1/2] Building signaling server for Windows...
+echo [1/8] Building signaling server for Windows...
 set GOOS=windows
 go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\signaling.exe .\cmd\signaling
 if %errorlevel% neq 0 (
@@ -49,8 +49,7 @@ if %errorlevel% neq 0 (
 echo [OK] signaling.exe built successfully
 echo.
 
-
-echo [2/2] Building signaling server for Linux...
+echo [2/8] Building signaling server for Linux...
 set GOOS=linux
 go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\signaling-linux-amd64 .\cmd\signaling
 if %errorlevel% neq 0 (
@@ -58,6 +57,47 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 echo [OK] signaling-linux-amd64 built successfully
+echo.
+
+REM ---- agent / client 各平台二进制（供 Web 下载链接 Win/Linux/Mac 使用，须放在 signaling 同目录 bin\）----
+
+echo [3/8] Building agent for Windows...
+set GOOS=windows
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\agent.exe .\cmd\agent
+if %errorlevel% neq 0 ( echo [ERROR] Failed to build agent for Windows & exit /b 1 )
+echo [OK] agent.exe built successfully
+echo.
+
+echo [4/8] Building client for Windows...
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\client.exe .\cmd\client
+if %errorlevel% neq 0 ( echo [ERROR] Failed to build client for Windows & exit /b 1 )
+echo [OK] client.exe built successfully
+echo.
+
+echo [5/8] Building agent for Linux...
+set GOOS=linux
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\agent-linux-amd64 .\cmd\agent
+if %errorlevel% neq 0 ( echo [ERROR] Failed to build agent for Linux & exit /b 1 )
+echo [OK] agent-linux-amd64 built successfully
+echo.
+
+echo [6/8] Building client for Linux...
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\client-linux-amd64 .\cmd\client
+if %errorlevel% neq 0 ( echo [ERROR] Failed to build client for Linux & exit /b 1 )
+echo [OK] client-linux-amd64 built successfully
+echo.
+
+echo [7/8] Building agent for macOS...
+set GOOS=darwin
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\agent-darwin-amd64 .\cmd\agent
+if %errorlevel% neq 0 ( echo [ERROR] Failed to build agent for macOS & exit /b 1 )
+echo [OK] agent-darwin-amd64 built successfully
+echo.
+
+echo [8/8] Building client for macOS...
+go build -buildvcs=false -ldflags="-s -w" -o %BUILD_DIR%\client-darwin-amd64 .\cmd\client
+if %errorlevel% neq 0 ( echo [ERROR] Failed to build client for macOS & exit /b 1 )
+echo [OK] client-darwin-amd64 built successfully
 echo.
 
 
