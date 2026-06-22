@@ -790,6 +790,14 @@ function openShareModal(agentId) {
                     <option value="permanent">永久</option>
                 </select>
             </div>
+            <div class="form-group">
+                <label>密码模式</label>
+                <select id="share-pwmode">
+                    <option value="embed" selected>自带密码（托管，对方拿链接直接连，免输入）</option>
+                    <option value="ask">不带密码（对方连接时需自行输入 Agent 密码，更安全）</option>
+                </select>
+                <div style="font-size:12px;color:#94a3b8;margin-top:6px;">不带密码：链接本身不足以连接，对方还须知道 Agent 本地密码——双重保险。</div>
+            </div>
             <button class="btn btn-primary" id="share-create-btn">生成共享链接</button>
             <div id="share-result" style="margin-top:14px;"></div>
             <hr style="margin:18px 0;border:none;border-top:1px solid #eee;">
@@ -806,16 +814,20 @@ function openShareModal(agentId) {
 
 async function createShare(agentId, overlay) {
     const duration = overlay.querySelector('#share-duration')?.value || '24h';
-    let pwd = getSavedAgentPassword(agentId);
-    if (!pwd) {
-        pwd = window.prompt('请输入该 Agent 的本地密码（用于免密码共享，将托管到服务器）：', '');
-        if (pwd == null) return;
-        if (!String(pwd).trim()) { log('密码不能为空', 'error'); return; }
+    const embed = (overlay.querySelector('#share-pwmode')?.value || 'embed') === 'embed';
+    let pwd = '';
+    if (embed) {
+        pwd = getSavedAgentPassword(agentId);
+        if (!pwd) {
+            pwd = window.prompt('请输入该 Agent 的本地密码（将托管到服务器，对方免输入）：', '');
+            if (pwd == null) return;
+            if (!String(pwd).trim()) { log('密码不能为空', 'error'); return; }
+        }
     }
     try {
         const resp = await fetch(`${getSignalURL()}/share/create`, {
             method: 'POST', headers: buildJSONHeaders(true),
-            body: JSON.stringify({ agent_id: agentId, duration, agent_password: pwd })
+            body: JSON.stringify({ agent_id: agentId, duration, agent_password: pwd, embed_password: embed })
         });
         if (!resp.ok) { log(`创建共享失败: ${await resp.text()}`, 'error'); return; }
         const d = await resp.json();
@@ -823,10 +835,14 @@ async function createShare(agentId, overlay) {
         const url = `${origin}/webconsole/?share=${d.token}`;
         const cmd = `client -signal ${origin} -share ${d.token}`;
         const exp = d.permanent ? '永久有效' : ('到期：' + new Date(d.expires_at).toLocaleString());
+        const modeNote = d.needs_password
+            ? '🔒 <b>不带密码</b>模式：对方打开后还需<b>输入 Agent 本地密码</b>才能连接。'
+            : '⚡ <b>自带密码</b>模式：对方拿链接即可直接连接，无需输入密码。';
         const res = overlay.querySelector('#share-result');
         res.innerHTML = `
             <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px;">
-                <div style="font-size:13px;color:#065f46;margin-bottom:10px;">✅ 已创建（${exp}）。把<b>共享链接</b>发给对方即可直接 Web 访问终端；或用 client 命令连接：</div>
+                <div style="font-size:13px;color:#065f46;margin-bottom:6px;">✅ 已创建（${exp}）</div>
+                <div style="font-size:12.5px;color:#475569;margin-bottom:10px;">${modeNote}</div>
                 ${shareCopyRow('共享链接', url)}
                 ${shareCopyRow('Client', cmd)}
             </div>`;
@@ -849,8 +865,10 @@ async function loadAgentShares(agentId, overlay) {
         if (!shares.length) { box.textContent = '暂无共享'; return; }
         box.innerHTML = shares.map(s => {
             const exp = s.permanent ? '永久' : (s.expired ? '已过期' : new Date(s.expires_at).toLocaleString());
+            const mode = s.needs_password ? '🔒需密码' : '⚡免密码';
             return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9;">
                 <code style="flex:1;font-size:11px;color:#64748b;word-break:break-all;">…${escapeHtml(s.token.slice(-12))}</code>
+                <span style="font-size:11px;color:#64748b;white-space:nowrap;">${mode}</span>
                 <span style="font-size:12px;color:${s.expired ? '#c00' : '#64748b'};white-space:nowrap;">${exp}</span>
                 <button class="btn btn-secondary" data-copylink="${escapeHtml(window.location.origin + '/webconsole/?share=' + s.token)}" style="padding:3px 10px;">复制链接</button>
                 <button class="btn btn-danger" data-revoke="${escapeHtml(s.token)}" style="padding:3px 10px;">撤销</button>
@@ -3340,11 +3358,22 @@ async function enterShareMode(token) {
         state.agentsById = state.agentsById || {};
         state.agentsById[d.agent_id] = state.selectedAgent;
         state.isShareMode = true;
-        const pi = document.getElementById('agent-password');
-        if (pi) pi.value = d.agent_password;                // connect() 从该输入框读取密码
         log(`共享访问：${state.selectedAgentName}`);
         if (!d.online) { showShareError(`Agent「${state.selectedAgentName}」当前离线，请稍后刷新本页重试。`); return; }
-        connect();
+        if (d.needs_password) {
+            // 不带密码模式：让接收方输入 Agent 本地密码后再连接（弹出连接框）。
+            state.agentPassword = '';
+            const modalText = document.getElementById('connect-modal-agent');
+            if (modalText) modalText.textContent = state.selectedAgentName;
+            const pi = document.getElementById('agent-password');
+            if (pi) pi.value = '';
+            document.getElementById('connect-modal')?.classList.remove('hidden');
+            setTimeout(() => document.getElementById('agent-password')?.focus(), 0);
+        } else {
+            const pi = document.getElementById('agent-password');
+            if (pi) pi.value = d.agent_password;            // connect() 从该输入框读取密码
+            connect();
+        }
     } catch (err) {
         showShareError('无法建立共享连接：' + err.message);
     }

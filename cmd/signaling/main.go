@@ -611,6 +611,7 @@ func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 		AgentID       string `json:"agent_id"`
 		Duration      string `json:"duration"`
 		AgentPassword string `json:"agent_password"`
+		EmbedPassword *bool  `json:"embed_password"` // nil 视为 true（兼容旧前端）
 		Label         string `json:"label"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -622,20 +623,28 @@ func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid duration (1h/24h/30d/permanent)", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.AgentPassword) == "" {
-		http.Error(w, "agent_password is required (用于免密码共享)", http.StatusBadRequest)
-		return
+	// 双模式：embed=true 托管密码(对方免输入)；embed=false 不托管(对方连接时需自行输入)。
+	embed := req.EmbedPassword == nil || *req.EmbedPassword
+	pwd := req.AgentPassword
+	if embed {
+		if strings.TrimSpace(pwd) == "" {
+			http.Error(w, "embed_password 模式需要 agent_password", http.StatusBadRequest)
+			return
+		}
+	} else {
+		pwd = "" // 不托管
 	}
-	rec, err := s.dataStore.CreateShare(user.ID, req.AgentID, req.AgentPassword, req.Label, ttl)
+	rec, err := s.dataStore.CreateShare(user.ID, req.AgentID, pwd, req.Label, ttl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	writeJSON(w, map[string]interface{}{
-		"token":      rec.Token,
-		"agent_id":   rec.AgentID,
-		"expires_at": shareExpiryJSON(rec),
-		"permanent":  rec.ExpiresAt.IsZero(),
+		"token":          rec.Token,
+		"agent_id":       rec.AgentID,
+		"expires_at":     shareExpiryJSON(rec),
+		"permanent":      rec.ExpiresAt.IsZero(),
+		"needs_password": rec.AgentPassword == "",
 	}, http.StatusOK)
 }
 
@@ -655,14 +664,15 @@ func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
 		}
 		expired := !sh.ExpiresAt.IsZero() && time.Now().After(sh.ExpiresAt)
 		list = append(list, map[string]interface{}{
-			"token":       sh.Token,
-			"agent_id":    sh.AgentID,
-			"agent_name":  name,
-			"label":       sh.Label,
-			"permanent":   sh.ExpiresAt.IsZero(),
-			"expires_at":  shareExpiryJSON(&sh),
-			"expired":     expired,
-			"created_at":  sh.CreatedAt,
+			"token":          sh.Token,
+			"agent_id":       sh.AgentID,
+			"agent_name":     name,
+			"label":          sh.Label,
+			"permanent":      sh.ExpiresAt.IsZero(),
+			"expires_at":     shareExpiryJSON(&sh),
+			"expired":        expired,
+			"created_at":     sh.CreatedAt,
+			"needs_password": sh.AgentPassword == "",
 		})
 	}
 	writeJSON(w, map[string]interface{}{"shares": list}, http.StatusOK)
@@ -733,7 +743,8 @@ func (s *Server) handleShareRedeem(w http.ResponseWriter, r *http.Request) {
 		"session_token":  session.Token,
 		"agent_id":       rec.AgentID,
 		"display_name":   name,
-		"agent_password": rec.AgentPassword,
+		"agent_password": rec.AgentPassword, // 不托管模式为空
+		"needs_password": rec.AgentPassword == "",
 		"ice_servers":    s.iceServersForUser(rec.OwnerUserID, baseICE),
 		"ttl_seconds":    int(time.Until(session.ExpiresAt).Seconds()),
 		"online":         online,

@@ -204,10 +204,18 @@ func main() {
 	client.config.PrintICEServers()
 
 	if *shareToken != "" {
-		// 共享令牌：免账号、免密码——兑换后直接连接被共享的 agent。
+		// 共享令牌：免账号兑换后直接连接被共享的 agent。
 		if err := client.redeemShare(*shareToken); err != nil {
 			fmt.Printf("[Client] 共享令牌无效或已过期: %v\n", err)
 			os.Exit(1)
+		}
+		// 不带密码模式：共享未托管密码，需自行输入 agent 本地密码。
+		if client.agentPassword == "" {
+			client.agentPassword = strings.TrimSpace(client.promptLine("该共享需要输入 Agent 本地密码: "))
+			if client.agentPassword == "" {
+				fmt.Println("[Client] Agent password is required")
+				os.Exit(1)
+			}
 		}
 	} else {
 		var loginErr error
@@ -420,6 +428,7 @@ func (c *Client) redeemShare(token string) error {
 		AgentID       string                   `json:"agent_id"`
 		DisplayName   string                   `json:"display_name"`
 		AgentPassword string                   `json:"agent_password"`
+		NeedsPassword bool                     `json:"needs_password"`
 		ICEServers    []protocol.ICEServerInfo `json:"ice_servers"`
 		Online        bool                     `json:"online"`
 	}
